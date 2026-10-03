@@ -1,0 +1,10 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://builder/Builder.cs" id="1_builder"]
+[ext_resource type="Script" path="res://builder/BuilderScene.cs" id="2_scene"]
+
+[node name="Builder" type="Node"]
+script = ExtResource("1_builder")
+
+[node name="Scene" type="Node3D" parent="."]
+script = ExtResource("2_scene")

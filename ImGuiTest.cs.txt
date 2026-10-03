@@ -1,0 +1,25 @@
+using Godot;
+
+public partial class ImGuiTest : Node
+{
+	public override void _Ready()
+	{
+		// Connect to Shatadev's ImGui layout event
+		ImGui.OnLayout(OnLayout);
+	}
+
+	private void OnLayout()
+	{
+		if (ImGui.Begin("ImGui Test Window"))
+		{
+			ImGui.Text("Hello from Godot 4.7 in C#!");
+
+			if (ImGui.Button("Click Me"))
+			{
+				GD.Print("Button inside ImGui clicked!");
+			}
+
+			ImGui.End();
+		}
+	}
+}

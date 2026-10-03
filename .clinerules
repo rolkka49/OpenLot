@@ -1,0 +1,583 @@
+# OpenLot Code Generation Guidelines
+
+## 0. Context you must hold in mind
+
+OpenLot is a decentralized, self-hosted, open-source alternative to Roblox. The stack is **Godot 4 with C#**, used as an infrastructure layer only: Godot's renderer, physics, networking and gizmo systems are borrowed, but the animation system, UI system, and modding/plugin architecture are custom-built on top rather than using Godot's built-in equivalents for those four. Scripting exposed to end users runs through a **Lua layer** (via an xLua-derived binding) sitting on top of the C# core — most gameplay/creation-side logic that a *creator* writes will be Lua calling into a defined C# API surface, not raw C# in the lot itself.
+
+Two audiences work on code here: Rolkka (the developer) and AI tools generating C#/Lua on his behalf, usually from an organized task description he writes and expects translated into working code. Because Rolkka can't always live-verify unfamiliar generated code against a black box, **code must be predictable, inspectable, and consistent with existing patterns** — favor clarity and traceability over cleverness every time.
+
+---
+
+## 1. Architecture Rules
+
+### 1.1 Layering — respect it strictly
+
+```
+
+Lua (creator-facing scripts)
+↓ calls into
+C# API surface (LuaManager-equivalent, explicit bound methods)
+↓ built on
+Godot C# layer (rendering, physics, scene tree, GLTF, gizmos, Networking)
+
+```
+- Never let Lua touch Godot APIs directly. All Lua access must go through the defined C# API surface — this is the security/sandboxing boundary and the plugin-tier boundary (see §1.4). If a new capability is needed in Lua, add a bound method to the API surface; don't punch a hole through it.
+- Custom systems (animation `.lanim`, UI, modding) should treat Godot as a service they consume, not a framework they're embedded inside. Avoid writing code that only works if it lives inside Godot's own editor/scene-authoring workflow — OpenLot's tooling is meant to be usable independent of the Godot editor at runtime.
+- Don't reach "up" a layer. Godot-layer code must never call into Lua or the plugin system directly; it exposes hooks/events that upper layers subscribe to.
+
+### 1.2 Custom systems stay custom
+- Animation: use the `.lanim` format and OpenLot's own Animator/playback pipeline. Do not wire gameplay code directly to Godot's `AnimationPlayer`/`AnimationTree` as the source of truth — those are implementation details the custom system may use internally, not the public contract.
+- UI: use OpenLot's own UI system (ImGui-derived heritage from the terminal work) for anything player/creator-facing. Don't introduce Godot's Control-node UI as a second UI paradigm inside gameplay-facing surfaces — it's fine only where it's purely an internal editor/debug convenience, and must be clearly marked as such.
+- When in doubt whether something is "Godot infrastructure" (fine to use directly) or "OpenLot custom system territory" (must go through the custom layer), default to treating it as custom-system territory and ask/flag rather than assume.
+
+### 1.3 Networking and state.
+- The core exposes only narrow enforcement primitives (kick/ban/query a peer) to plugins. Moderation *policy*, commands and workflows are plugin territory (see §1.4) and are never baked into the core. Whoever implements them: enforcement must be host-authoritative, and must never trust client-reported state for enforcement decisions.
+
+### 1.4 Plugin/modding tiers — don't blur them
+- **Tier 1 (Terminal apps/ gameplay client plugins):** sandboxed, terminal/window-API-only. Never give a Tier 1 plugin direct access to scene/object state.
+- **Tier 2 (Creation-environment plugins):** access build-mode's defined plugin API (tools/panels/importers) only. Never let a Tier 2 plugin reach into rendering/physics internals directly.
+- **Tier 3 (Deep/engine-level):** the only tier allowed to touch Godot internals (shaders, custom optimizations). Code written at this tier must be clearly separated and documented as Tier 3 — never write Tier 3-reaching code and expose it as if it were a Tier 1/2 capability.
+- When generating a plugin or plugin-facing API, always state which tier it targets and justify why it needs that tier's access level.
+
+---
+
+## 2. Style Rules
+
+### 2.1 C# conventions
+- Follow standard .NET naming: `PascalCase` for classes/methods/public members, `camelCase` for locals/private fields, `_camelCase` or `camelCase` with a leading underscore for private backing fields — pick one and stay consistent within a file/module (match whatever the surrounding file already uses; don't introduce a third convention into an existing file).
+- Explicit types over `var` when the inferred type isn't obvious at a glance from the right-hand side — readability for a solo dev re-reading AI-generated code later matters more than brevity.
+- Singletons (e.g. `LuaManager`-style) should be explicit and minimal — a clear static accessor, not a hidden service-locator pattern layered on top.
+
+### 2.2 Lua-facing API design
+- Every method bound from C# into Lua should have an unambiguous, verb-first name (`SetPosition`, `SpawnObject`, not `Position` as a setter-getter overload) — Lua callers need to be able to tell intent from the name alone.
+- Keep the bound API surface minimal and additive. Don't expose broad/general-purpose C# objects into Lua "for convenience" — expose specific, narrow methods, so the sandboxing boundary in §1.1 stays enforceable.
+- Document every newly bound method with what it does, its parameters, and any side effects, right next to the binding — this is the contract creators will actually script against.
+
+### 2.3 Comments and structure
+- Comment *why*, not *what*, for anything non-obvious — especially around any borrowed/adapted third-party pattern (e.g. ImGuizmo integration, GLTF loading quirks) so Rolkka can tell later what's OpenLot-original vs. adapted.
+- Keep functions short and single-purpose; a function that spans a full screen without a clear single responsibility should be split, especially in AI-generated code where verification-by-reading is the main review tool available.
+- No dead code, no commented-out old implementations left in place — if it's superseded, remove it; Git history is the record, not inline comments.
+
+### 2.4 Performance and bloat discipline
+- Avoid per-frame allocations in hot paths (`Update`/render loop equivalents) — reuse buffers/objects rather than allocating new ones every frame, given the project's explicit goal of staying lightweight versus Unity/Roblox bloat.
+- Don't add a dependency (NuGet package, external library) for something a small amount of original code can do — every added dependency works against the project's "avoid bloat, avoid external engine lock-in" thesis. If a library genuinely saves real effort on a hard problem (e.g. ImGuizmo for gizmo math), that's a deliberate, named exception — not a default.
+- Prefer editing/updating existing state over recreating objects, especially for anything touching the scene graph or Lua-bound objects, since these can be called frequently from creator scripts.
+
+---
+
+## 3. What NOT to do
+
+- Don't silently change public API method signatures that Lua scripts or plugins already depend on — that's a breaking change to creator-facing contracts and must be called out explicitly, not slipped in.
+- Don't add speculative "just in case" configurability or abstraction layers beyond what the current task needs — this project's stated philosophy is lean and purpose-built, not generalized-for-hypothetical-futures.
+- Don't write code that only makes sense inside the Godot editor's authoring flow when the target is runtime/build-mode behavior — OpenLot's build mode is its own authored experience, not a thin wrapper around the Godot editor.
+- Don't invent new naming/structural conventions when an existing pattern in the codebase already covers the case — match what's there first, propose a change separately if the existing pattern seems wrong.
+
+---
+
+# OpenLot Optimization & Memory-Safety Review Prompt
+
+You are reviewing OpenLot's codebase (Godot 4 + C#, with a Lua scripting layer bound through a C# API surface) for **memory leaks, unnecessary bloat, and performance issues only**. You are not reviewing naming conventions, architecture layering, or style — assume those are handled elsewhere. Stay scoped to runtime cost and memory safety.
+
+## Hard constraints — do not violate these while optimizing
+
+1. **Never change visual/UI style or behavior.** No adjusting spacing, colors, layout, animation feel, or any user-visible output as a side effect of an optimization. If a perf fix would risk a visible change, flag it instead of applying it.
+2. **Never cut or reduce a feature.** Do not remove functionality to "simplify" something for performance. If a feature is the actual cause of a serious perf problem, flag it with an explanation — don't silently strip it.
+3. **Preserve all existing public API/Lua-bound method signatures.** Optimizing internals is fine; changing what a creator's Lua script can call, or what parameters it takes, is not — that's a breaking change outside this task's scope.
+
+## What to check for
+
+### Memory leaks
+- Event/signal subscriptions that are never unsubscribed (Godot signal connections, C# events) — especially on objects that get destroyed/freed while still subscribed elsewhere
+- Godot node references held after the node is freed (`QueueFree()`'d nodes still referenced elsewhere)
+- Lua-side objects or closures holding references to C# objects longer than needed, preventing GC
+- Static collections (lists, dictionaries, caches) that grow unbounded — added to but never pruned or cleared
+- Disposable resources (textures, meshes, file handles, network connections) not explicitly released when no longer needed
+
+### Unnecessary bloat
+- Per-frame allocations in hot paths (`_Process`/`_PhysicsProcess` equivalents, render loop, anything called every tick) — flag allocations that could be hoisted out or reused via pooling
+- Redundant work repeated every frame that could be cached or computed once (e.g. recomputing something static, re-fetching a reference that doesn't change)
+- Unused imports, dead fields, or unreferenced private methods left behind from earlier iterations
+- Overly broad object graphs passed around when only a small piece of data is actually needed (e.g. passing a whole GameObject-equivalent when only a position is used)
+- Boxing/unboxing in hot paths (value types being implicitly boxed into object references repeatedly)
+
+### Performance
+- O(n²) or worse patterns where a better data structure (dictionary lookup vs. linear scan, etc.) would avoid it, especially in code that runs per-object or per-frame across many objects (character updates, physics/collision checks, Lua API calls)
+- Synchronous work on the main thread that blocks rendering/input (file I/O, network calls) where it could be async/deferred
+- Physics/collision checks running more often or on more objects than necessary (e.g. no broad-phase culling before narrow-phase checks)
+- String concatenation/formatting in hot paths where a non-allocating alternative exists
+- Lua↔C# boundary crossings happening more often than needed in a tight loop, where batching the calls would reduce marshaling overhead
+
+---
+
+# OpenLot Roadmap
+
+**Target MLP/MVP:** late November 2026 (Godot-based alpha/experimental stage)
+**Target full release:** March 2027
+**Stack:** Godot 4 (C#) as infrastructure layer (rendering, physics, gizmos) — custom animation system, custom UI system, custom modding/plugin architecture built on top
+
+Legend for difficulty tags carried over from the original planning pass:
+🔴 Red = extremely hard / needs research · 🟠 Orange = Rolkka organizes, AI translates to C# · 🟡 Yellow = repetitive, AI handles smoothly · 🟩 Green = only Rolkka, fine-tuning/feel
+
+---
+
+## 1. Migration 1 
+
+### Milestone 1.1 - Migrating terminal system from unity to godot
+- [x] Set up DearImGui
+- [x] Migrate main menu
+- [x] Migrate The Terminal
+---
+
+## 2. Migrating And Improving Creation Environment (Build Mode)
+
+### Milestone 2.1 — Migrating to Godot
+- [x] Get current unity builder verision into godot and fit the pieces (make it compatable with curent systems)
+
+
+### Milestone 2.2 — Core build tools
+- [x] Gizmos (move/rotate/scale/select) — use ImGuizmo or a close port rather than reinventing gizmo math
+- [X] Object selection/sorting UI
+- [x] GUI Gizmos/tools
+- [ ] Gizmo snapping: toggleable increment snap for move (grid), rotate (angle) and scale, with configurable increments and a modifier-key override; the snap config lives in the toolbox (`GizmoMath.Snap` already exists — this is wiring + config UI, not new math)
+**Acceptance criteria:** A creator can enter build mode, fly around with freecam, select an object, and move/rotate/scale it with visible gizmo handles.
+**Difficulty:** 🟠 moving · 🔴 smooth gizmos · 🟡 GUI creation tools · 🟡 increment snapping
+
+### Milestone 2.3 — Inspector property system
+- [ ] Scrollable Inspector section so long property lists stay usable
+- [ ] Typed property widgets: checkbox (bool), dropdown (enum/choice), plus the existing numeric/text fields
+- [ ] Per-object property set, starting with: Anchored, CanCollide, Texture
+- [ ] Background picture property: apply an image as the lot background instead of the procedural sky. A file browser pops up and the user browses to the image; a clear action returns to the default sky
+- [ ] Semantics for the two new part properties settled in code comments before the widgets land — what `CanCollide = false` does to the body (`CollisionShape3D.Disabled` vs. removing the shape), and what "Anchored" actually blocks (editor drag only, or every position write including Lua `SetPosition`)
+- [ ] Properties are exposed through the bound Lua API, so scripts can read and set them (respecting the §1.1 boundary: no direct Godot access)
+- [ ] Property widgets are data-driven (a property declares its type and options), so adding a new property doesn't require new Inspector UI code
+**Acceptance criteria:** A creator can select an object, scroll the Inspector, toggle Anchored/CanCollide with checkboxes, pick a Texture from a dropdown, and see the change take effect in the scene and in Lua.
+**Difficulty:** 🟡 scrollable Inspector · 🟡 typed widgets · 🟠 data-driven property declaration · 🟠 Anchored/CanCollide semantics · 🔴 Texture + background picture (shared image-loading path, seeds §5.2)
+
+### Milestone 2.4 — Editor workflow
+- [ ] Undo/redo across gizmo drags, Inspector edits and hierarchy operations (command stack; `MarkDirty` is the only history today)
+- [ ] Drag objects in the hierarchy panel to reorder, and drag one object into another to reparent (`Reparent` exists; the panel has clicks + marquee only)
+- [ ] Autosave and crash recovery — **depends on §8.1's `.lot` format**; nothing exists to serialize yet
+**Acceptance criteria:** A creator can undo and redo any edit, reorder and reparent by dragging in the hierarchy, and recover their lot after a crash or restart without losing work.
+**Difficulty:** 🟠 undo/redo · 🟠 hierarchy drag/reparent · 🔴 autosave/crash recovery (blocked on §8.1)
+
+### Milestone 2.5 — Lighting and environment settings
+- [ ] Time of day (sun angle + colour), fog, and sky presets in the creation environment, replacing the fixed procedural sky (`BuilderScene.BuildViewport`)
+- [ ] Environment settings persisted as lot metadata — **depends on §8.1**
+**Acceptance criteria:** A creator sets time of day, fog and a sky preset in build mode and sees the same lighting when the lot is loaded and played.
+**Difficulty:** 🟠 environment controls · 🟠 persistence (blocked on §8.1)
+
+---
+
+## 3. Scripting Layer (Lua)/ Runtime
+
+### Milestone 3.1 — Lua-to-Godot API surface
+- [X] Port the existing xLua-based C# API surface (position, color, spawn, etc.) from the Unity prototype to Godot's C# host
+- [x] LuaManager-equivalent singleton for Godot
+- [x] Re-verify the "script moves/recolors an object" proof-of-concept in the Godot scene graph
+**Acceptance criteria:** A Lua script attached to an object can read/set its position and color, matching the working Unity prototype's behavior.
+**Difficulty:** 🟠
+
+### Milestone 3.2 — Unified per-entity script model
+- [x] One Lua script per entity, networking expressed through namespaced `net.server` / `net.client` tables instead of manually instantiated remote events
+- [x] Implicit RPC routing — ordinary function declarations under `net.server` / `net.client` become remote calls, with no manual event binding, string identifiers, or client/server if-guards in creator code
+- [x] Strict server authority — `net.server` functions execute only on the host; client calls transmit to the host, host calls broadcast to connected clients
+- [x] Metatable hooks trap both declaration and call, implemented as sugar over a single bound C# API method (never direct Godot access from Lua — §1.1 boundary)
+- [x] The lot root is itself an entity: its script runs at lot load, so a new lot can spawn its capsule character and camera in Lua *(the load-time root-script path exists; the capsule/camera content itself lands with §3.4)*
+- [x] Graceful offline degradation — `net.*` resolves to direct local calls when a lot runs with no network (single-player, editor Test mode — see §3.4)
+- [x] Argument serialization rules defined (which Lua types cross the wire; error behaviour for unsupported types)
+- [x] Design doc before code: peer model (the host peer, not a hardcoded peer ID, given the §7.2 P2P hosting path), behaviour when a client calls an undefined `net.server` function, and whether one script may declare both `net.server` and `net.client`
+**Implementation status:** complete for the offline/loopback path (real P2P transport is §7, behind an `INetTransport` seam). Verified by `NetSelfTest` (169 fast checks on private Lua states, plus an opt-in 8-check heavy set via `OPENLOT_HEAVY_TESTS`) + `GizmoSelfTest` (171 checks). Index: see the **Implementation Index** section near the end of this file, and `docs/design/milestone-3.2-unified-script-model.md`.
+**Acceptance criteria:** Two entities with separate scripts interact as plain function calls — a client invoking `net.server` performs a host-authoritative action, and the host invoking `net.client` triggers local client behaviour such as an animation or audio cue — with no creator code containing manual remote-event setup or client/server branching, and a new lot spawning its default character without manual scripting.
+**Difficulty:** 🔴 (one unified model is a single design problem — the routing design must be settled before implementation)
+
+### Milestone 3.3 — Godot renderer baseline
+- [x] Skybox rendering (procedural sky + shadowed directional sun, `BuilderScene.BuildViewport`)
+- [x] Scene graph / object model for lots (LotRoot / LotUIRoot containers + integer handle registry — OpenLot-specific, not Godot's default scene tree semantics)
+**Acceptance criteria:** A lot loads with a skybox, a lit scene with visible directional shadows, and a scene-graph object model the Lua API can address by handle, all inside the Godot host.
+**Difficulty:** 🟠 
+
+### Milestone 3.4 — Test mode / Game mode + capsule character
+*Test mode and the capsule character are one milestone: Test mode is not meaningfully playable without a controllable character, and the character is a runtime concern rather than an art/asset one (it used to live in §5 as "capsule prototyping").*
+
+*Capsule work*
+- [x] Capsule character controller with basic movement and orbital camera (`CapsuleController` + `OrbitalCamera`: kinematic `CharacterBody3D` swept with `MoveAndSlide`, camera-relative WASD, gravity/jump, floor detection; the body excludes the part's own static collider, the same technique `PartDragController` uses)
+- [x] A brand-new lot ships with base default Lua code that spawns the capsule character and camera, so it is playable immediately on creation with no manual scripting (`BuilderScene.EnsureDefaultLotScript` writes/attaches `user://Scripts/Character.lua`, which spawns the capsule at lot load; the camera is created by the runtime on session entry — scripts cannot touch Godot nodes, §1.1 — and `FindCharacter()` picks the first Capsule as the player)
+
+*Mode switching*
+- [x] Activate the two stubbed builder menu entries (`Builder.DrawMainMenuBar`: Test → Play in Test Mode / Stop Test Mode, Game → Play in Game Mode / Stop Game Mode; Escape leaves a session)
+- [x] Test mode — run the lot in place from the creation environment: freecam hands off to the player camera and controller, scripts execute, and the creator can drop back into edit mode without losing state (editor tooling suspended, lot UI still drawn)
+- [x] Game mode — the runtime player session a lot is played in, with no creation-environment tooling active (same session with the dockspace, menu bar and panels not drawn; the 3D view fills the display)
+
+*Known implementation seams (from the pre-3.4 code review — resolve these, don't rediscover them)*
+- [x] `LotObjectKind` gains a Capsule kind and `LotLuaApi` a matching bound spawn method (`LotObjectKind` was Cube/Sphere/Cylinder/Plane; the bound surface had no capsule spawn). Documented next to the binding per §2.2. Landed with sandbox parity: a `capsule()` convenience wrapper in both the entity sandbox (`LuaBootstrap`) and the scratch chunk (`LuaManager`), plus a Toolbox spawn button. Verified by `NetIntegrationTest.TestLiveCapsuleSpawnPath` (real VM: reflection registration → sandbox proxy → mesh + collision build → reload cleanup)
+- [x] Camera ownership handoff: `FreecamController` hardcoded `Current = true` at build time and gated input on a layout-time `ViewportWindow` flag. Extracted `ICameraInputSource` (`CameraInputSource.cs`): the Viewport window resolves the per-frame conditions once and both cameras read from it, each acting only while Godot-`Current` and only for its own session
+- [x] `ViewportWindow.InputEnabled` is an instance property reassigned from modal state every layout pass (`Builder.DrawLayout`) — the Test-mode gate composes with that assignment via the pure `ViewportWindow.ResolveCameraAuthority(inputEnabled, focused, playerSession, ...)`: a modal denies both cameras, the session then decides which one gets the rest (verified by 4 integration checks)
+- [x] Script runtime lifecycle is start/stop-able: `BuilderScene.StartScriptRuntime()` / `StopScriptRuntime()` replaced the one-shot `_Ready`/`_ExitTree` block, so the runtime can be restarted mid-session (verified: stop clears it, start returns a running runtime that re-runs the lot's scripts). Reload-on-transition is the intended shape (see decision below); wiring this pair into the Test-mode menu entries is the remaining half
+- [ ] Player-originated `net.*` attribution wired up: `LuaNetBridge.SimulatePlayerInteraction` exists but only the self-tests call it. **Blocked — there is no input→script call path to scope yet**: lot UI elements have no click handling (`LotUIElement` is visual-only; interaction is §4.2), movement/look never cross into Lua, and the "button → door" self-test drives its handler directly rather than through player input. The first real consumer is lot-UI interaction, so this lands with it rather than behind fabricated plumbing
+- [x] Debug physics smoke test (`BuilderScene.RunPhysicsSmokeTest`) spawned bodies into the lot physics space — now skipped while a session is active. (The default character is also spawned clear of the test's origin-region probes: a ray straight down at x=0 asserts exact contact geometry, and a capsule parked at the origin broke 8 of its assertions)
+- [x] `PartDragController` runs in `Builder._PhysicsProcess` and never fights the character for a body: entering a session queues the drag's release, and the Viewport window skips pointer input entirely during a session, so no drag can start or survive
+
+*Decisions settled for this milestone*
+- **Entering Test mode reloads the lot** (script runtime restarts, `start()` re-runs, script-owned spawns re-spawn); exiting tears it down again and returns to the build-mode world. Chosen over an in-place transition because it is the honest runtime semantics, matches what the §3.2 design doc already describes, and avoids making the editor/runtime boundary re-entrant. Cost: unsaved Inspector edits do not survive a Test-mode round trip — acceptable while §8 save/load does not exist, since nothing else is durable yet
+- **State ownership:** script-owned spawns are destroyed on reload, so a capsule spawned by a lot-root script is re-spawned on re-entry rather than preserved across it
+- **`net.*` in Test mode** resolves through the existing `LoopbackTransport` — there is no peer, so calls stay local; only the origination scope changes
+
+**Implementation status:** landed and verified headless. `ICameraInputSource` + `OrbitalCamera` + `CapsuleController` are new; `Builder.EnterTestMode`/`ExitTestMode` and the Test/Game menu entries drive `BuilderScene.EnterTestMode(bool gameMode)`. Verified by `NetIntegrationTest.TestPlayerSessionCameraHandoff` (15 checks: the gate-composition truth table, the camera handoff both ways, character attach/detach, Test vs. Game) plus `TestLiveCapsuleSpawnPath` (6 checks) — 59 integration checks green alongside `GizmoSelfTest` 171 and `NetSelfTest` 169. One seam left open and marked blocked below (Player-originated `net.*`).
+**Acceptance criteria:** A creator can hit Test mode from the builder and immediately play their lot — a brand-new empty lot spawns a controllable capsule character with a working camera and running scripts, with no manual scripting — then return to editing; Game mode plays the same lot with no editor tooling present.
+**Difficulty:** 🔴 (two coupled halves plus a new runtime/editor boundary — the mode switch, the character, and the script lifecycle have to land together or not at all)
+
+### Milestone 3.5 — Collision groups and layers
+- [ ] Per-object collision layer/mask editing (currently hardcoded `CollisionLayer = 1` / `CollisionMask = 0` on every part) with named groups
+- [ ] Which interactions collide is creator-controlled; the host stays authoritative for anything with enforcement impact (§1.3)
+**Acceptance criteria:** A creator puts objects into named collision groups and only the intended objects interact.
+**Difficulty:** 🟠
+
+### Milestone 3.6 — Constraints and joints
+- [ ] Hinge and weld constraints between parts, requiring dynamic bodies (parts are static-only today)
+- [ ] Decide how constraints interact with Anchored / CanCollide from §2.3
+**Acceptance criteria:** A creator hinges or welds two parts and they hold or pivot correctly in play.
+**Difficulty:** 🔴 (needs a dynamic-body layer first — pairs with the Anchored/CanCollide semantics decision in §2.3)
+
+### Milestone 3.7 — Event/signal system
+- [ ] Script-subscribed events: `touched`, `clicked`, plus per-frame and timer callbacks — scripts today have only load + `start()`, with `Tick()` never reaching Lua
+- [ ] Event registration through the bound API (narrow subscribe/unsubscribe methods per §1.1, never raw Godot signal connections leaking into Lua)
+- [ ] Handlers run under the existing watchdog/memory budgets; one misbehaving handler must not stall the frame (frame-budget accounting in `ScriptRuntime.Tick`)
+- [ ] `touched`/`clicked` carry the originating player through the §3.4 attribution path (`BeginPlayerInteraction`), so this lands together with the in-lot command UI (4.2) and lot UI activation (4.3) — one shared in-session input blocker
+- [ ] `playerJoined`/`playerLeft` wait on §7.1 (no peers exist on `LoopbackTransport`); the chat UI work in 7.3 can use them once they land
+**Acceptance criteria:** A part's script reacts to touch and click, a timer callback fires on schedule without tripping the watchdog, and a player-triggered handler executes with player attribution.
+**Difficulty:** 🟠 event registration + budgets · 🔴 player attribution (blocked with 3.4/4.2/4.3) · `playerJoined`/`playerLeft` blocked on 7.1
+
+### Milestone 3.8 — Tween/timing library
+- [ ] Smooth property changes from Lua (position, rotation, color, UI rects) without per-frame loops in scripts
+- [ ] Implemented as a C# tween list advanced in `ScriptRuntime.Tick`, writing through the existing Lua-accessible setters — Lua never runs per frame, so the watchdog budgets are untouched
+- [ ] Delayed/repeating timers with cancel handles, surfaced through the same tick rather than Godot's `SceneTreeTimer` (keeps determinism across the reload-on-Test-mode boundary from 3.4)
+**Acceptance criteria:** A script tweens a part across the lot and schedules a delayed callback with one call each, with no per-frame Lua and no watchdog trips.
+**Difficulty:** 🟡/🟠 (a C# list plus tick integration; the design constraint is the watchdog, not the math)
+
+### Milestone 3.9 — Input API
+- [ ] Key/mouse/gamepad state readable from scripts, polled once per frame and cached (not one Lua↔C# call per key — the boundary-crossing cost the perf rules flag)
+- [ ] Composes with §4.5 keybinding customization and §12.1 gamepad support: scripts see logical actions, never hardcoded physical keys (today `CapsuleController`/`FreecamController` hardcode WASD)
+- [ ] Authority rule documented: raw input is client-local; anything with enforcement impact goes through host-authoritative `net.server` (§1.3) — decided here, not later
+**Acceptance criteria:** A script reads jump/interact actions each frame via logical names, works with rebound keys and a gamepad, and a hostile client cannot move another player's character.
+**Difficulty:** 🟠 (+ 🔴 if input ever drives enforcement — see §1.3)
+
+### Milestone 3.10 — Camera API
+- [ ] Script-selectable modes: first-person, fixed, and scripted (cutscene) — built as modes on the existing freecam/orbital machinery (`OrbitalCamera` seeding + the shared-input handoff already exist), not a second camera stack
+- [ ] Cutscene scripting writes through per-frame C# interpolation (same tick pattern as 3.8), so Lua describes the shot and C# moves the camera
+- [ ] Handoff rule with Test-mode entry/exit (3.4) and character attach/detach documented — which owner holds the camera in each state
+**Acceptance criteria:** A script switches a player to first-person, pins a fixed camera, then plays a scripted cutscene move and returns control cleanly.
+**Difficulty:** 🟠
+
+### Milestone 3.11 — Physics API
+- [ ] Raycasts from Lua (the query path already exists internally in `PartDragController` — this is exposure, not new physics)
+- [ ] Forces/velocity on parts — **depends on the dynamic-body layer from §3.6** (parts are static-only today); one dependency, shared with constraints/joints
+- [ ] Material properties per part (friction, bounciness, mass) once bodies exist; names reserved in the 2.3 property declaration table meanwhile so the Inspector and Lua agree on vocabulary
+**Acceptance criteria:** A script raycasts to find what's ahead, pushes a dynamic part with a force, and sets friction/bounciness that observably change how it slides and bounces.
+**Difficulty:** 🟠 raycasts · 🔴 forces/velocity (blocked on 3.6's dynamic bodies) · 🟡 material properties once bodies exist
+
+### Milestone 3.12 — Per-player persistent data API (DataStore equivalent)
+- [ ] Design doc before code (same bar as 3.2): where the data lives under P2P hosting (§7.2) — host-held with client cache vs. each-peer-owns-own — settled before any storage code
+- [ ] Key/value per-player store with read/write through the bound API; enforcement-relevant reads stay host-authoritative (§1.3)
+- [ ] On-disk slot reserved in the §8.1 `.lot` format for player data, decided together with the format rather than bolted on later
+**Acceptance criteria:** A script saves a player's coins, the value survives a lot reload, and the ownership model is documented — no silent "client tells the host its balance" trust hole.
+**Difficulty:** 🟠 storage · 🔴 ownership design (decide early)
+
+---
+
+## 4. Terminal / Menu UI
+
+*Status: functionally complete from the Unity prototype; migration to Godot in progress (main menu + terminal already moved and fixed up as of today).*
+
+### Milestone 4.1 — terminal system part 2
+- [ ] Re-verify command set parity: help, openlot (join/host/list/create), clear, neofetch, sysinfo, motd, ping, matrix, register/login/logout, theme, alias, ls, avatar, disconnect, registertopublic
+- [ ] Re-verify auth gate (login/register/help/clear open pre-login, everything else locked)
+- [ ] Re-verify "openlot list" interactive TUI selection flow into a lot
+**Acceptance criteria:** Every command from the Unity terminal build works identically in the Godot port, auth gating behaves the same, and TUI list navigation loads a selected lot.
+**Difficulty:** 🟩/🟠 (Rolkka-owned, feel/fit-and-finish)
+
+### Milestone 4.2 — In-lot command UI
+- [ ] Design and build an in-game window/UI system for commands while inside a lot (the old TerminalOutput UI was removed from LocalLot for being buggy there — needs a proper replacement, not a reuse)
+**Acceptance criteria:** A player/creator can open a command UI while inside a live lot without the bugs that broke the previous in-lot terminal attempt.
+**Difficulty:** 🟠
+
+### Milestone 4.3 — Lot UI customization
+- [ ] More customization options for lot UI elements (`LotUIRoot`), using the same typed property widgets as 2.3
+- [ ] Checkbox and dropdown controls available as lot UI elements, not only in the editor (new `LotUIKind`s — today it is Frame/Button/Text/Scrollbar)
+- [ ] Scrollable containers for lot UI, using ImGui's existing child-region support (`BeginChild`) for clipping and scrolling rather than the current `Scrollbar` kind, which draws a static thumb over nothing
+- [ ] Click routing that reaches script handlers: element presses resolved through ImGui item state inside the viewport window, extended past today's editor-only selection/drag path in `UiGizmoController` to actual activation during a player session
+- [ ] Customization properties settable from Lua
+*Note: the click-routing and scroll-container items share the blocker with the in-lot command UI in 4.2 and the player-originated `net.*` attribution item in 3.4 — the ImGui primitives exist, but there is no in-session path from a lot UI press to a script handler yet.*
+**Acceptance criteria:** A creator can build a lot UI panel with a checkbox, a dropdown and a scroll area, style it, and have a script react to its values.
+**Difficulty:** 🟠 (ImGui supplies scrolling and item-state hit-testing; the work is element kinds, property wiring, and extending routing to in-session activation)
+
+### Milestone 4.4 — Client settings system
+- [ ] Settings screen grown from the existing theme-only window (`Terminal.DrawSettingsWindow`) into a real, tabbed settings surface
+- [ ] Camera settings: FOV, mouse sensitivity (already fields on `FreecamController` / `OrbitalCamera`, currently hardcoded to 0.15), invert-Y, and a scope decision (per-camera or global)
+- [ ] Graphics settings: resolution scale / viewport size, shadow toggle, MSAA, render method — applied live where Godot allows it
+- [ ] Settings persisted to disk and applied on startup, with a restore-defaults action
+- [ ] Settings reachable in-lot as well as from the main menu, so a player can change them without leaving a session
+**Acceptance criteria:** A player can open settings from the main menu or in-lot, change FOV/sensitivity/graphics options, see them take effect immediately, and find them still applied after restarting the client.
+**Difficulty:** 🟠 FOV/sensitivity/persistence · 🟠 graphics options · 🟠 in-lot access
+
+### Milestone 4.5 — Keybinding customization
+- [ ] Rebindable keys for editor tools, camera and player controls, with conflict detection and a restore-defaults action (feeds §4.4's settings screen)
+**Acceptance criteria:** A player rebinds a key, and both the editor and in-lot controls use the new binding after a restart.
+**Difficulty:** 🟠
+
+---
+
+## 5. Characters, 3D meshes
+
+*Capsule prototyping moved to §3.4 — it is a runtime concern (Test mode needs a controllable character to be meaningful), not an art/asset one.*
+
+### Milestone 5.1 — Rigged characters
+- [ ] R6-style rig support
+- [ ] Body part tagging
+- [ ] .avlot format: accessories/3D mesh attachment
+- [ ] .avlot format: animation tagging (walking/jumping/etc. — untagged animations won't function properly)
+**Acceptance criteria:** A rigged character loads with attached accessories and plays a tagged walk/jump animation correctly triggered by movement state.
+**Difficulty:** 🔴 R6 rig · 🟠 accessories/animation tagging
+
+### Milestone 5.2 — Runtime GLTF/rigged mesh loading/ Accessory application
+- [ ] Runtime loading of rigged 3D meshes (GLTF) with custom textures for characters/accessories
+- [ ] Confirm GLTFDocument/GLTFState API + Load() pattern works end-to-end for OpenLot's asset pipeline
+- [ ] Character Edit UI (Inside game creation Environment) Accessory placement, 2d clothing.
+**Acceptance criteria:** A character rig with a custom texture loads at runtime from a GLTF file with no editor pre-import step.
+**Difficulty:** 🟠 
+
+---
+
+## 6. Animation System & Audio
+
+*Custom systems, not Godot's built-in animation tooling.*
+
+### Milestone 6.1 — .lanim format + tooling
+- [ ] Animator UI (Roblox Animator-style)
+- [ ] Real-time animation-to-code conversion
+- [ ] Animation smoother, toggleable for a retro/choppy look option
+- [ ] Apply this animation system to non-character objects too
+**Acceptance criteria:** A creator can key a simple animation in the Animator UI, export it as .lanim, and see it play correctly on a rigged character in-lot, with the smoother togglable.
+**Difficulty:** 🔴 Animator UI · 🟠 real-time conversion · 🟡 smoother
+
+### Milestone 6.2 — Audio system
+- [ ] Sound playback/mixing, 3D positional audio, and an audio pool (no audio exists in the project today)
+- [ ] Audio bound into the Lua API so scripts can play cues (verb-first methods per §2.2)
+**Acceptance criteria:** A script can play a sound on an object and a player hears it positioned at that object in the lot.
+**Difficulty:** 🔴 (nothing exists yet) · 🟠 Lua binding
+
+---
+
+## 7. Networking
+
+### Milestone 7.1 — Session model
+- [ ] Host/join/list session model
+- [ ] State sync across clients
+**Acceptance criteria:** Two clients can join the same hosted lot and see each other's characters move in real time with acceptable sync.
+**Difficulty:** 🔴 🔴 — highest-research items on the whole roadmap; budget real standalone research time here
+
+### Milestone 7.2 — Decentralized/self-hosting model
+- [ ] Peer-to-peer hosting path (free/default option, alongside Providers — see §11)
+**Acceptance criteria:** A user can host a lot from their own machine and have it be joinable/discoverable without a Provider in the loop.
+**Difficulty:** 🔴
+
+### Milestone 7.3 — Chatting system
+*(moved from §12 — chat is part of the playable core, not a post-MLP extra)*
+- [ ] Chat Bubble support
+- [ ] Chatting UI
+- [ ] Private chat (P2P without messages hitting the server they are in) — depends on 7.1's transport; the two items above can land on the existing `LoopbackTransport` path first
+**Acceptance criteria:** A player can send chat that others in the lot see as a bubble and in the chat UI, with private chat routed peer-to-peer.
+**Difficulty:** 🟠 (bubbles/UI) · 🔴 (private P2P chat, until 7.1 exists)
+
+---
+
+## 8. Save/load & lot persistence
+
+### Milestone 8.1 — .lot format & versioning
+- [ ] Define the `.lot` schema and a format version field, plus the migration path for older files
+- [ ] Define the serialized payload: 3D objects, lot UI elements (`LotUIRoot`), script references, and lot metadata (name, environment settings)
+**Acceptance criteria:** The `.lot` format is documented and versioned, and a file written by an older build is either migrated or rejected with a clear error rather than failing silently.
+**Difficulty:** 🟠
+
+### Milestone 8.2 — Save/load
+- [ ] Save a creation as a `.lot` file
+- [ ] Load a saved creation, same device
+- [ ] Transfer and load a saved creation on a different device (may be held for later)
+**Acceptance criteria:** A lot built on one machine can be saved, copied to a second machine, and loaded there with all objects, UI elements and scripts intact.
+**Difficulty:** 🟠
+
+---
+
+## 9. Testing & QA/ simple servers
+
+### Milestone 9.1 — Tester team process
+- [ ] Recruit/organize a small tester team
+**Acceptance criteria:** A tester can report an issue through a defined channel and it's triaged before the next build.
+**Difficulty:** 🟩 (Rolkka-owned directly)
+
+### Milestone 9.2 — Networking bug reports into tester networking
+- [ ] Define a lightweight bug-report/feedback loop through a channel the tester team owns
+- [ ] Route it through an API so the team can triage incoming reports
+**Difficulty:** 🟠
+
+### Milestone 9.3 — In-client reporting
+- [ ] Report a lot/player from in-client, routed into the §9.2 feedback channel with lot + client context attached
+- [ ] Moderation policy and enforcement stay in Tier 1/2 plugins (§1.3) — the core exposes only the narrow enforcement primitives, never policy
+**Acceptance criteria:** A player can report a lot from inside it and the report reaches the triage channel with enough context to act on.
+**Difficulty:** 🟠
+
+---
+
+# POST MLP
+
+## 10. Modding / Plugin System
+
+### Milestone 10.1 — Tier 1: Terminal apps
+- [ ] Package-manager-style install command (apt-like)
+- [ ] Sandboxed execution inside the terminal via its own API only
+**Acceptance criteria:** A third-party terminal app installs via the package manager and runs correctly without touching anything outside the terminal API surface.
+**Difficulty:** 🟠
+
+### Milestone 10.2 — Tier 2: Creation-environment plugins
+- [ ] Package-manager install path shared with Tier 1
+- [ ] Defined plugin API extending build-mode (tools/panels/importers)
+**Acceptance criteria:** A sample plugin adds a new tool/panel to build mode using only the published plugin API.
+**Difficulty:** 🟠
+
+### Milestone 10.3 — Tier 3: Deep/engine-level plugins
+- [ ] Document the boundary where Tier 3 plugins reach past OpenLot's API into Godot itself
+- [ ] Custom optimization/shader plugin support
+**Acceptance criteria:** A documented example shows a Tier 3 plugin modifying rendering behavior directly, with clear docs on what's supported vs. unsupported.
+**Difficulty:** 🔴
+
+---
+
+## 11. Providers & Platform Economy
+
+*Separate from free peer-to-peer hosting (§7.2), which remains available.*
+
+### Milestone 11.1 — Provider system core
+- [ ] Provider listing/discovery mechanism (third parties list games on their own discoverable list)
+- [ ] Provider-managed hosting path as an alternative to self-hosting
+- [ ] Per-provider configurable ToS, pricing, rules, moderation policy, age-safety tier
+- [ ] Liability model: explicitly provider-owned, not OpenLot-owned, reflected in docs/ToS templates
+**Acceptance criteria:** A third-party provider can register, set their own rules/pricing/age-tier, and list/host a game, with OpenLot's own docs clearly scoping liability to the provider.
+**Difficulty:** 🔴 (new, largely undesigned below the concept level)
+
+### Milestone 11.2 — Official OpenLot provider
+- [ ] Stand up Rolkka's own instance as the official provider
+- [ ] Self-custody USDC flow for creator payouts (wallet-to-wallet, no provider custody)
+- [ ] No minor monetization at launch — minors earn/buy only through a parent-held wallet
+**Acceptance criteria:** A creator on the official provider can receive a USDC payment directly to their own wallet with the provider never holding funds in the loop.
+**Difficulty:** 🔴 (custody-avoidant design already settled; implementation still open)
+
+### Milestone 11.3 — Monetization features (official provider)
+- [ ] Managed hosting tiers (bandwidth/storage tiers, priority slots)
+- [ ] Discovery/promoted placement in game listings
+- [ ] Creator "Pro" subscription tier (extra plugin slots, higher limits, analytics)
+- [ ] Player "Plus" subscription tier (cosmetic perks, exclusive access)
+- [ ] (Later stage) B2B "OpenLot Cloud" hosted backend infra + consulting for third-party providers
+**Acceptance criteria:** A creator can subscribe to Pro and immediately see raised limits/analytics access; a player can subscribe to Plus and receive a cosmetic perk.
+**Difficulty:** 🟠 hosting tiers/subscriptions · 🔴 B2B infra (post-MLP, needs an actual provider ecosystem first)
+
+### Milestone 11.4 — Official plugins (post-MLP stage)
+- [ ] Ko-fi / Patreon API integration plugin for gamepasses/paid games
+- [ ] Roblox compatibility tools, staged least-to-most advanced (Lua API shim scoping, R6/R15 rig mapping research, asset importer)
+- [ ] "Bender" — precise object-bending creation tool
+- [ ] (More TBD as MLP usage reveals gaps)
+**Acceptance criteria:** Ko-fi/Patreon plugin lets a creator gate a paid game/gamepass without OpenLot ever touching payment custody; Roblox compat tier list published even if only partial shimming is implemented.
+**Difficulty:** 🟡 Ko-fi/Patreon · 🔴 Roblox compat (start scoping/research early, don't wait for "last stage" to begin) · 🟠 Bender
+
+---
+
+## 12. More Sophisticated Characters, Extra features (might change)
+
+### Milestone 12.1 — Controller / gamepad support *(Post-MLP)*
+- [ ] Gamepad input for player movement, camera look and UI navigation, including rebinding
+**Acceptance criteria:** A player can move, look and navigate lot UI with a controller.
+**Difficulty:** 🟠
+
+### Milestone 12.2 — Template lots *(Post-MLP)*
+- [ ] Shippable starter lots (obby, hangout, sandbox) that a creator can open as a starting point — depends on §8.2 save/load
+**Acceptance criteria:** A creator can open a template lot from the menu, edit it, and save it as their own.
+**Difficulty:** 🟡 once §8.2 exists · 🔴 authoring the templates themselves
+
+### Milestone 12.3 — Localization *(Post-MLP — to be decided)*
+*Still to be planned — scoped after §8's save format exists, since string tables need a defined on-disk home and a versioning story. Candidate ground: string tables replacing hardcoded text in the terminal, panels and Lua-facing messages, plus runtime language switching.*
+**Difficulty:** TBD
+
+### Milestone 12.4 — R16
+- [ ] R16-style rig support
+- [ ] Tagging for the R16
+**Difficulty:** 🟠
+
+### Milestone 12.5 — Vehicle mechanics
+*Still to be planed*
+
+### Milestone 12.6 — Asset browser panel *(Post-MLP)*
+- [ ] Import meshes, textures and audio, then browse and drag them into the scene — one panel feeding the Texture property (2.3), background picture (2.3), audio cues (6.2) and templates (12.2), which each carry their own ad-hoc loading until this lands
+**Difficulty:** 🟠
+
+### Milestone 12.7 — Lot snapshots / version history *(Post-MLP)*
+- [ ] Restore an earlier state after a bad edit; leans on §8 serialization, and is the history counterpart to 2.4-autosave's crash slot (autosave = latest recovery point, snapshots = named history)
+**Difficulty:** 🟠/🔴 (retention + storage policy is the hard part, not the restore)
+
+### Milestone 12.8 — Spawn points, teams, and checkpoints as objects *(Post-MLP)*
+- [ ] Placeable objects with runtime semantics (respawn routing, checkpoint capture), firing through the 3.7 event system (`playerJoined`/respawn hooks); the editor side is Toolbox/Inspector work on the 2.3 descriptor table
+**Difficulty:** 🟠
+
+### Milestone 12.9 — Leaderboard *(Post-MLP)*
+- [ ] Ordered score display over per-player data (3.12) rendered through lot UI (4.3); host-authoritative ordering per §1.3
+**Difficulty:** 🟡 once 3.12 + 4.3 exist
+
+### Milestone 12.10 — Creator credits and license metadata *(Post-MLP)*
+- [ ] Credits/license attached to assets and lots, stored in §8 lot metadata alongside the 12.6 browser entries that imported them
+**Difficulty:** 🟡 (metadata + display)
+
+### Milestone 12.11 — Accessibility *(Post-MLP)*
+- [ ] UI scale, colorblind-safe palettes, reduced motion — applied on top of the 4.3 lot UI layer and the 4.4 settings screen rather than per-element special cases
+**Difficulty:** 🟠
+
+---
+
+## Implementation Index — Milestone 3.2 (`net.*` + per-entity scripts)
+
+Full decision record, execution flow and limitations: **`docs/design/milestone-3.2-unified-script-model.md`**.
+Creator-facing reference: **`docs/net-api.md`**.
+
+**Where the pieces live** (all under `builder/`):
+
+| Piece | File | One-line contract |
+|---|---|---|
+| VM bootstrap + sandbox | `LuaBootstrap.cs` | The Lua chunk: default-deny whitelist, sealed metatables, `makeNet(handle)`, validation pre-pass, watchdog hook, env loader, cross-entity sugar. Everything here is sugar over the bound `LotLuaApi` methods — no Godot access from Lua (§1.1). |
+| Watchdog | `LuaWatchdog.cs` | Instruction budgets (200k/dispatch, 1M/script load, 4M/frame, 3 trips ⇒ circuit breaker). Hook installed **from Lua**; always cleared **from C#** first. |
+| Memory guard | `LuaMemoryGuard.cs` | `lua_setallocf` hard cap (64 MB), `OomHit` flag checked after every dispatch, VM rebuilt at a frame boundary. |
+| Net bridge | `LuaNetBridge.cs` | `IDispatchTarget`: decode args onto the raw Lua stack, dispatch, trip counting, script-name registry, OOM/deferred rebuild, script loading. |
+| Router | `NetRouter.cs` + `NetTransport.cs` | Transport-agnostic envelope/queue/rate-limit/authority core; `INetTransport` is the §7 seam (`LoopbackTransport` today). |
+| Wire codec | `NetSerializer.cs` | Argument tags, table array/pair sections, all budgets, stack-based decode, wrapper disposal. |
+| Script runtime | `ScriptRuntime.cs` | Script discovery, per-script envs, deterministic handle order, lot-root-at-load, frame `Tick`, teardown. |
+| Lifecycle | `LuaManager.cs`, `BuilderScene.cs` | VM lifecycle/scratch path (`RunString`) and the lot world: handle registry (root = 0), load-order handles, script load via `StartScriptRuntime` (restartable — the §3.4 Test-mode re-entry seam), `_Process` tick, `StopScriptRuntime` in `_ExitTree` teardown order. |
+| Verification | `NetSelfTest.cs` + `NetIntegrationTest.cs` | 169 unit checks (private Lua states only) + an opt-in 8-check heavy set (`OPENLOT_HEAVY_TESTS`) + 59 integration checks driving the REAL LuaManager/ScriptRuntime and live lot; all run headless under `#if DEBUG`. The fast set prints its wall-clock; integration waits a few physics frames, prints a "suite complete: N checks" line and exits non-zero if it aborts. |
+
+**Invariants any future change must keep**
+- Lua reaches C# only through `LotLuaApi`; `NetInvoke`/`NetRegister`/`CallServer`/`CallClient` are the only net entry points, and the raw table-taking forms stay out of creator reach.
+- All net traffic is queued and dispatched from `NetRouter.Flush()`; nothing executes synchronously, and recursion must never become stack depth.
+- Contract changes to bound methods, tag bytes, table sections or creator-visible names are breaking changes to creator-facing API — call them out, never slip them in.
+- The watchdog hook is installed from Lua (error() is safe there) and cleared from C# after every unit; never throw managed exceptions through native Lua frames.
+
+**Known limitations (see the design doc §6 for detail)**
+- Scripts run at lot load only — hot re-attaching a script waits for §3.4 Test mode.
+- Editor-spawned objects get handles only once a registration path touches them (option A covers everything present at load).
+- `coroutine` is unavailable in scripts; single blocking built-ins cannot be preempted.
+- Numbers cross as doubles (2^53 precision); an OOM rebuild loses script globals.
+- **Native `lua54` is not packaged yet** — Lua runs only with a compatible `liblua54.so` on the library path; bundling it is required before Test mode ships.
+- Load-time spawns are owned by their script and removed before a reload (F2 closed); handler spawns are unowned by design. Physics smoke-test timing sensitivity (F4, deferred). Scripting suspension is terminal until the lot reloads and shows as a red banner in the Viewport window.
+- Origination rule: autonomous calls (lot load, start(), timers) are System in ALL modes; Player only inside an explicit interaction scope (`NetRouter.BeginPlayerInteraction`; Test mode: `SimulatePlayerInteraction`).
+---
+
+## Sequencing Notes
+
+- **MLP/Alpha (target Mid-late Nov 2026):** §1 Migration/terminal, §2 Creation Environment (Build Mode: 2.3 Inspector properties, 2.4 editor workflow, 2.5 lighting/environment), §3 Scripting/Runtime (§3.4 Test/Game mode + capsule character, §3.5 collision groups, §3.6 constraints/joints, §3.7 events/signals, §3.8 tween/timing, §3.9 input, §3.10 camera, §3.11 physics, §3.12 per-player data), §4 Terminal/Menu (§4.3 lot UI customization, §4.4 client settings, §4.5 keybindings), §7.3 chatting (bubbles/UI only), §8 Save/load, §9 Testing loop (§9.3 in-client reporting). This is the playable, buildable core — no monetization, no providers, no plugins yet.
+  - **Carve-outs inside the MLP set:** private P2P chat (7.3) and `playerJoined`/`playerLeft` (3.7) wait on §7.1's transport; autosave/crash recovery (2.4), environment persistence (2.5) and the player-data slot (3.12) are blocked on §8.1's `.lot` format; forces/velocity and material properties (3.11) and constraints/joints (3.6) wait on a dynamic-body layer that does not exist yet. Build the rest, land these as the dependency arrives.
+- **Post-MLP — Official Plugins (§11.4):** Ko-fi/Patreon first (cheapest, no custody issue), Roblox compatibility research started early even though shipping is later (it's the linchpin of the developer-migration growth thesis), Bender and others after.
+- **Post-MLP — Other Features:** §5.1 rigged characters, §6.1 animation system + §6.2 audio, §7.1–7.2 full networking, §10 full plugin tiers, §11.1–11.3 provider system and monetization, §12.1 controller support, §12.2 template lots, §12.3 localization (to be decided), §12.6 asset browser, §12.7 lot snapshots, §12.8 spawn points/teams/checkpoints, §12.9 leaderboard, §12.10 creator credits/license metadata, §12.11 accessibility.
+- **Ongoing:** Polish pass driven by real MLP usage data rather than pre-guessed priorities.

@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://j1jn4gspif80"]
+
+[ext_resource type="Script" uid="uid://dgwaa5pl1gd2j" path="res://Terminal.cs" id="1_sxuvd"]
+
+[node name="Terminal" type="Node2D" unique_id=1668209505]
+script = ExtResource("1_sxuvd")
