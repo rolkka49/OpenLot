@@ -64,6 +64,7 @@ public partial class BuilderScene : Node3D
 	private bool _constraintSuiteDone;
 	private bool _eventSuiteDone;
 	private bool _tweenSuiteDone;
+	private bool _inputSuiteDone;
 
 	/// <summary>
 	/// Heavy self-tests (a 20k-encode loop, an 8 MB out-of-memory, a ~10 MB allocation) run only when
@@ -395,6 +396,8 @@ public partial class BuilderScene : Node3D
 		if (InTestMode) return;
 		InTestMode = true;
 		InGameMode = gameMode;
+		// Milestone 3.9: no input edge survives the session boundary.
+		LotInputActions.Reset();
 
 		// Before the reload, so the snapshot is exactly the world the creator is looking at.
 		_sessionSnapshot = LotSessionSnapshot.Capture(this);
@@ -444,6 +447,8 @@ public partial class BuilderScene : Node3D
 		if (!InTestMode) return;
 		InTestMode = false;
 		InGameMode = false;
+		// Milestone 3.9: the session's input state does not leak back into build mode.
+		LotInputActions.Reset();
 		// Milestone 3.7: sensors are session artifacts — they come down with the session, before
 		// the reload below re-runs the scripts (and the reload clears the registries anyway).
 		if (Events != null) Events.OnSessionEnded();
@@ -683,10 +688,32 @@ public partial class BuilderScene : Node3D
 		PlayerCamera.SetTarget(Player.Position);
 	}
 
+	/// <summary>
+	/// Raw mouse state for scripts (milestone 3.9, design doc D8): motion and wheel accumulate as
+	/// events arrive; the per-frame poll snapshots and zeroes them. Runs in every mode and
+	/// regardless of the script runtime — the freecam's action reads depend on the poll too.
+	/// </summary>
+	public override void _Input(InputEvent @event)
+	{
+		if (@event is InputEventMouseMotion motion)
+		{
+			LotInputActions.AccumulateMouseMotion(motion.Relative.X, motion.Relative.Y);
+		}
+		else if (@event is InputEventMouseButton button && button.Pressed)
+		{
+			if (button.ButtonIndex == MouseButton.WheelUp) LotInputActions.AccumulateWheel(1);
+			else if (button.ButtonIndex == MouseButton.WheelDown) LotInputActions.AccumulateWheel(-1);
+		}
+	}
+
 	/// <summary>Frame tick for the scripting layer: starts the frame's instruction accounting,
 	/// drains the net queue, then processes a deferred VM rebuild (see ScriptRuntime.Tick).</summary>
 	public override void _Process(double delta)
 	{
+		// Milestone 3.9: one input poll per frame, before anything reads it — the controllers and
+		// every script read the same snapshot, and this runs whether or not the script runtime is
+		// up (the freecam uses actions in build mode).
+		LotInputActions.Poll();
 		if (LuaScripts != null) LuaScripts.Tick(delta);
 #if DEBUG
 		// The net integration suite deliberately waits a few physics frames: its OOM churn and
@@ -732,6 +759,13 @@ public partial class BuilderScene : Node3D
 			TweenSelfTest.Run(this);
 		}
 		TweenSelfTest.TickProbe();
+		// The input suite (milestone 3.9) runs after the tween probe finishes.
+		if (!_inputSuiteDone && TweenSelfTest.ProbeDone)
+		{
+			_inputSuiteDone = true;
+			InputSelfTest.Run(this);
+		}
+		InputSelfTest.TickProbe();
 #endif
 	}
 
@@ -768,6 +802,12 @@ public partial class BuilderScene : Node3D
 				"use --quit-after 6000 when verifying headless)");
 		else if (!TweenSelfTest.ProbeDone)
 			GD.PushWarning("[BuilderScene] tween probe never finished (it needs ~2 s of wall-clock runtime after " +
+				"its suite, so give the run room: --quit-after 6000 verified headless)");
+		if (!_inputSuiteDone)
+			GD.PushWarning("[BuilderScene] input suite never ran (run ended before the tween probe finished; " +
+				"use --quit-after 6000 when verifying headless)");
+		else if (!InputSelfTest.ProbeDone)
+			GD.PushWarning("[BuilderScene] input probe never finished (it needs ~2 s of wall-clock runtime after " +
 				"its suite, so give the run room: --quit-after 6000 verified headless)");
 #endif
 	}

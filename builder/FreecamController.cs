@@ -47,18 +47,21 @@ public partial class FreecamController : Camera3D
 
 	private void ApplyMovement(float delta)
 	{
+		// Movement reads the shared action snapshot (milestone 3.9) — the same keys as before by
+		// default. Note the fly-up key is Space, which is the "jump" action's default binding:
+		// one binding set serves both contexts (editor flight, in-session jump).
 		Basis basis = GlobalTransform.Basis;
 		Vector3 move = Vector3.Zero;
-		if (Input.IsPhysicalKeyPressed(Key.W)) move += -basis.Z;
-		if (Input.IsPhysicalKeyPressed(Key.S)) move += basis.Z;
-		if (Input.IsPhysicalKeyPressed(Key.D)) move += basis.X;
-		if (Input.IsPhysicalKeyPressed(Key.A)) move += -basis.X;
-		if (Input.IsPhysicalKeyPressed(Key.Space)) move += Vector3.Up;
+		if (LotInputActions.IsPressed(LotInputActions.MoveForward)) move += -basis.Z;
+		if (LotInputActions.IsPressed(LotInputActions.MoveBackward)) move += basis.Z;
+		if (LotInputActions.IsPressed(LotInputActions.MoveRight)) move += basis.X;
+		if (LotInputActions.IsPressed(LotInputActions.MoveLeft)) move += -basis.X;
+		if (LotInputActions.IsPressed(LotInputActions.Jump)) move += Vector3.Up;
 
 		if (move == Vector3.Zero) return;
 
 		float speed = MoveSpeed;
-		if (Input.IsPhysicalKeyPressed(Key.Shift)) speed *= SprintMultiplier;
+		if (LotInputActions.IsPressed(LotInputActions.Sprint)) speed *= SprintMultiplier;
 		GlobalPosition += move.Normalized() * speed * delta;
 	}
 }

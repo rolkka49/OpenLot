@@ -807,6 +807,70 @@ public class LotLuaApi
 		return _scene.Scheduler.Cancel(id);
 	}
 
+	// --- input (milestone 3.9) ---
+	//
+	// Creator API. Every read answers from the one per-frame snapshot (LotInputActions.Poll),
+	// never from Input directly, and every read is session-gated: while the creator is building,
+	// keystrokes belong to the editor, so these answer false/0 rather than leak editor input into
+	// scripts. Unknown action names warn and answer false/0, so a typo is visible.
+
+	/// <summary>True while the named action is held this frame (\"moveForward\", \"jump\", ...).</summary>
+	public bool IsActionPressed(string action)
+	{
+		int index = ResolveAction(action, "IsActionPressed");
+		return _scene != null && _scene.InTestMode && LotInputActions.IsPressed(index);
+	}
+
+	/// <summary>True on the frame the named action went down (exactly one frame per press).</summary>
+	public bool WasActionPressed(string action)
+	{
+		int index = ResolveAction(action, "WasActionPressed");
+		return _scene != null && _scene.InTestMode && LotInputActions.WasPressed(index);
+	}
+
+	/// <summary>True on the frame the named action came back up (exactly one frame per release).</summary>
+	public bool WasActionReleased(string action)
+	{
+		int index = ResolveAction(action, "WasActionReleased");
+		return _scene != null && _scene.InTestMode && LotInputActions.WasReleased(index);
+	}
+
+	/// <summary>How strongly the named action is held, 0..1 (a gamepad stick reports its
+	/// deflection; a key reports 1 or 0).</summary>
+	public float GetActionStrength(string action)
+	{
+		int index = ResolveAction(action, "GetActionStrength");
+		return _scene != null && _scene.InTestMode ? LotInputActions.Strength(index) : 0f;
+	}
+
+	/// <summary>Raw mouse motion accumulated this frame (pixels), for custom look code.</summary>
+	public float GetMouseDeltaX()
+	{
+		return _scene != null && _scene.InTestMode ? LotInputActions.MouseDeltaX : 0f;
+	}
+
+	/// <summary>Raw mouse motion accumulated this frame (pixels), for custom look code.</summary>
+	public float GetMouseDeltaY()
+	{
+		return _scene != null && _scene.InTestMode ? LotInputActions.MouseDeltaY : 0f;
+	}
+
+	/// <summary>Wheel steps accumulated this frame (+1 per up notch, -1 per down).</summary>
+	public int GetMouseWheel()
+	{
+		return _scene != null && _scene.InTestMode ? LotInputActions.Wheel : 0;
+	}
+
+	private int ResolveAction(string action, string verb)
+	{
+		int index = LotInputActions.IndexOf(action);
+		if (index < 0)
+		{
+			Warn("[Input] " + verb + ": unknown action '" + (action ?? "") + "'");
+		}
+		return index;
+	}
+
 	// --- internals ---
 
 	private int Spawn3D(LotObjectKind kind, Vector3 at)

@@ -132,17 +132,20 @@ public sealed class CapsuleController
 		Vector3 forward = new Vector3(-Mathf.Sin(yawRad), 0f, -Mathf.Cos(yawRad));
 		Vector3 right = new Vector3(Mathf.Cos(yawRad), 0f, -Mathf.Sin(yawRad));
 
+		// Movement reads the shared action snapshot (milestone 3.9): the same keys as before by
+		// default, but a rebind (§5.5) will move the character, the freecam and every script
+		// together.
 		Vector3 move = Vector3.Zero;
-		if (Input.IsPhysicalKeyPressed(Key.W)) move += forward;
-		if (Input.IsPhysicalKeyPressed(Key.S)) move -= forward;
-		if (Input.IsPhysicalKeyPressed(Key.D)) move += right;
-		if (Input.IsPhysicalKeyPressed(Key.A)) move -= right;
+		if (LotInputActions.IsPressed(LotInputActions.MoveForward)) move += forward;
+		if (LotInputActions.IsPressed(LotInputActions.MoveBackward)) move -= forward;
+		if (LotInputActions.IsPressed(LotInputActions.MoveRight)) move += right;
+		if (LotInputActions.IsPressed(LotInputActions.MoveLeft)) move -= right;
 		Vector3 horizontal = move.LengthSquared() > 0f ? move.Normalized() * MoveSpeed : Vector3.Zero;
 
 		if (_body.IsOnFloor())
 		{
 			if (_verticalVelocity < 0f) _verticalVelocity = 0f;
-			if (Input.IsPhysicalKeyPressed(Key.Space)) _verticalVelocity = JumpSpeed;
+			if (LotInputActions.IsPressed(LotInputActions.Jump)) _verticalVelocity = JumpSpeed;
 		}
 		else
 		{
