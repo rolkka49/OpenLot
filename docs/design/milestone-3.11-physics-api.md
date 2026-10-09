@@ -55,7 +55,9 @@ Lot.SetMass(part, 4)                -- 0 = auto (mesh volume), positive override
 
 * `PhysicsSelfTest` — pure: the descriptor declarations (defaults, clamps, the `MassForBody` auto
   rule) and the verb refusals (bad handle, anchored part, outside a session, zero direction); the
-  result-table shape on a private VM (field reads, miss = nil) — the NLua mechanism pin.
+  result-table shape on a private VM (field reads, miss = nil) — the NLua mechanism pin; and the
+  Inspector's own surface: its draw loop's collection holds the three rows as one `Physics` section
+  after `Part`, and the descriptor delegates its Float widgets edit through reach the part.
 * Staged session probe (headless): a real script (a) raycasts down at a target and up into the sky,
   reporting handle/point/normal/distance or a miss, (b) applies one impulse to a mass-auto cube and
   to a `SetMass(4)` cube and reports both velocities (the ratio is the mass-property test), (c) sets

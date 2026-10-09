@@ -33,6 +33,7 @@ public static class PhysicsSelfTest
 
 		TestDescriptors();
 		TestMaterialState();
+		TestInspectorSurface();
 		TestLuaSurface(scene);
 
 		GD.Print("[PhysicsSelfTest] " + _checks + " checks, " + _failures + " failure(s).");
@@ -262,6 +263,54 @@ public static class PhysicsSelfTest
 					sawAll = true;
 			}
 			Check("descriptors: a part collects the physics set", sawAll);
+		}
+		finally
+		{
+			part.Free();
+		}
+	}
+
+	// --- the Inspector's view (the same collection its draw loop walks) --------------------------
+
+	/// <summary>
+	/// The Inspector draws whatever <see cref="LotPropertyRegistry.CollectFor"/> returns for the
+	/// selected node — the panel's loop has been generic since §2.3. This pins the physics part of
+	/// that contract: the three rows reach the collection, they form ONE "Physics" section after
+	/// the "Part" section (the order the panel prints), and the descriptor delegates the Float
+	/// widgets write through really reach the part, clamps included.
+	/// </summary>
+	private static void TestInspectorSurface()
+	{
+		LotObject part = LotObject.Create(LotObjectKind.Cube, "InspectorPhysTest", new Color(1f, 1f, 1f));
+		try
+		{
+			List<LotPropertyDescriptor> buffer = new List<LotPropertyDescriptor>();
+			LotPropertyRegistry.CollectFor(part, buffer);
+
+			int frictionIndex = -1, bounceIndex = -1, massIndex = -1, groupIndex = -1;
+			for (int i = 0; i < buffer.Count; i++)
+			{
+				if (buffer[i].Id == "friction") frictionIndex = i;
+				else if (buffer[i].Id == "bounce") bounceIndex = i;
+				else if (buffer[i].Id == "mass") massIndex = i;
+				else if (buffer[i].Id == "collisionGroup") groupIndex = i;
+			}
+			Check("inspector: the physics rows reach the panel's collection",
+				frictionIndex >= 0 && bounceIndex >= 0 && massIndex >= 0);
+			Check("inspector: they form one Physics section, in order, after the Part section",
+				frictionIndex == bounceIndex - 1 && bounceIndex == massIndex - 1 &&
+				groupIndex >= 0 && groupIndex < frictionIndex &&
+				buffer[frictionIndex].Category == "Physics" &&
+				buffer[bounceIndex].Category == "Physics" &&
+				buffer[massIndex].Category == "Physics" &&
+				buffer[groupIndex].Category == "Part");
+
+			// The widgets write through these delegates (DrawFloatProperty -> property service ->
+			// SetFloat), so a round trip with a clamp proves the path an editor drag takes.
+			LotPropertyDescriptor friction = buffer[frictionIndex];
+			friction.SetFloat(part, -3f);
+			Check("inspector: editing Friction through the descriptor reaches the part (clamped)",
+				Near(friction.GetFloat(part), 0f, 1e-6f));
 		}
 		finally
 		{
