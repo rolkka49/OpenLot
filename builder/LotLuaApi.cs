@@ -871,6 +871,88 @@ public class LotLuaApi
 		return index;
 	}
 
+	// --- camera (milestone 3.10) ---
+	//
+	// Creator API. Camera modes are session-only — the camera belongs to the player session — so
+	// every one of these refuses politely outside one. "scripted" is entered only by FlyCamera;
+	// a direct SetCameraMode("scripted") is refused with a message pointing at FlyCamera.
+
+	/// <summary>Switches the player camera: "thirdperson", "firstperson" or "fixed". False outside
+	/// a session, for an unknown name, or for a direct "scripted" request.</summary>
+	public bool SetCameraMode(string mode)
+	{
+		if (_scene == null || !_scene.InTestMode || _scene.PlayerCamera == null)
+		{
+			Warn("[Camera] SetCameraMode: camera modes live inside a player session");
+			return false;
+		}
+		LotCameraMode parsed;
+		if (!LotCameraMath.TryParseMode(mode ?? "", out parsed) || parsed == LotCameraMode.Scripted)
+		{
+			Warn("[Camera] SetCameraMode: unknown mode '" + (mode ?? "") +
+				"' (use thirdperson/firstperson/fixed, or Lot.FlyCamera for a shot)");
+			return false;
+		}
+		return _scene.ApplyCameraMode(parsed);
+	}
+
+	/// <summary>Where the fixed camera sits (applied live in fixed mode, remembered for the next
+	/// time fixed is entered).</summary>
+	public void SetCameraPosition(float x, float y, float z)
+	{
+		if (_scene == null || _scene.PlayerCamera == null) return;
+		_scene.PlayerCamera.SetFixedPosition(new Vector3(x, y, z));
+	}
+
+	/// <summary>What the fixed camera looks at.</summary>
+	public void SetCameraTarget(float x, float y, float z)
+	{
+		if (_scene == null || _scene.PlayerCamera == null) return;
+		_scene.PlayerCamera.SetFixedTarget(new Vector3(x, y, z));
+	}
+
+	/// <summary>
+	/// Flies the camera from its current pose to (x,y,z) looking at (tx,ty,tz) over duration
+	/// seconds with the easing, then returns to the mode that was active — a cutscene move. Returns
+	/// the shot id for the bootstrap's cancel token (Lot.CancelCameraShot), or -1 when refused.
+	/// </summary>
+	public int FlyCamera(float x, float y, float z, float tx, float ty, float tz, float duration, string easing)
+	{
+		if (_scene == null || !_scene.InTestMode || _scene.PlayerCamera == null)
+		{
+			Warn("[Camera] FlyCamera: camera modes live inside a player session");
+			return -1;
+		}
+		LotEasingKind parsed;
+		if (!LotEasing.TryParse(easing, out parsed))
+		{
+			Warn("[Camera] FlyCamera: unknown easing '" + (easing ?? "") + "'");
+			return -1;
+		}
+		if (duration < 0f)
+		{
+			Warn("[Camera] FlyCamera: duration must not be negative");
+			return -1;
+		}
+		return _scene.PlayerCamera.StartShot(new Vector3(x, y, z), new Vector3(tx, ty, tz), duration, parsed);
+	}
+
+	/// <summary>Cancels the shot with that id, freezing the camera exactly where it is. False for
+	/// a shot that already ended — the token's harmless no-op path.</summary>
+	public bool CancelCameraShot(int id)
+	{
+		if (_scene == null || _scene.PlayerCamera == null) return false;
+		return _scene.PlayerCamera.StopShot(id);
+	}
+
+	/// <summary>The current camera mode's name ("thirdperson" outside a session or before any
+	/// scripted change).</summary>
+	public string GetCameraMode()
+	{
+		if (_scene == null || _scene.PlayerCamera == null) return LotCameraMath.ModeName(LotCameraMode.ThirdPerson);
+		return LotCameraMath.ModeName(_scene.PlayerCamera.Mode);
+	}
+
 	// --- internals ---
 
 	private int Spawn3D(LotObjectKind kind, Vector3 at)

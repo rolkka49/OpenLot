@@ -65,6 +65,7 @@ public partial class BuilderScene : Node3D
 	private bool _eventSuiteDone;
 	private bool _tweenSuiteDone;
 	private bool _inputSuiteDone;
+	private bool _cameraSuiteDone;
 
 	/// <summary>
 	/// Heavy self-tests (a 20k-encode loop, an 8 MB out-of-memory, a ~10 MB allocation) run only when
@@ -427,6 +428,11 @@ public partial class BuilderScene : Node3D
 				"the player camera follows the lot origin (spawn one with Lot.SpawnCapsule or the Toolbox).");
 		}
 
+		// Milestone 3.10: a session always starts in the default third-person mode, whatever a
+		// previous session left behind, and the character is visible again.
+		PlayerCamera.ResetModes();
+		ApplyCameraModeVisibility();
+
 		// Seed the orbit from the freecam so the handoff does not snap the view.
 		PlayerCamera.SeedOrbit(Freecam.RotationDegrees.Y, Freecam.RotationDegrees.X, Player.Position);
 		PlayerCamera.SetTarget(Player.Position);
@@ -452,6 +458,11 @@ public partial class BuilderScene : Node3D
 		// Milestone 3.7: sensors are session artifacts — they come down with the session, before
 		// the reload below re-runs the scripts (and the reload clears the registries anyway).
 		if (Events != null) Events.OnSessionEnded();
+
+		// Milestone 3.10: the session's camera mode ends with the session (the next entry starts
+		// in third person again, and the character is visible).
+		if (PlayerCamera != null) PlayerCamera.ResetModes();
+		ApplyCameraModeVisibility();
 
 		if (Player != null) Player.Detach();
 		if (PlayerCamera != null) PlayerCamera.Current = false;
@@ -598,6 +609,41 @@ public partial class BuilderScene : Node3D
 		UiGizmoMath.ClampRect(ref pos, ref sz, UiCanvasBounds);
 		element.Position = pos;
 		element.Size = sz;
+	}
+
+	// --- Camera modes (milestone 3.10) ----------------------------------------------------------
+
+	/// <summary>Switches the session camera's mode and applies the mode's visibility. Session-only:
+	/// the camera belongs to the player session, so a request outside one is refused (the API says
+	/// so out loud).</summary>
+	public bool ApplyCameraMode(LotCameraMode mode)
+	{
+		if (!InTestMode || PlayerCamera == null) return false;
+		if (!PlayerCamera.SetMode(mode)) return false;
+		ApplyCameraModeVisibility();
+		return true;
+	}
+
+	/// <summary>Applies the mode's visibility: first person hides the local character's mesh (you
+	/// must not see the inside of your own head); every other mode shows it again.</summary>
+	public void ApplyCameraModeVisibility()
+	{
+		LotObject character = FindCharacter();
+		if (character == null) return;
+		MeshInstance3D mesh = character.MeshInstance;
+		if (mesh == null || !GodotObject.IsInstanceValid(mesh)) return;
+		bool firstPerson = PlayerCamera != null && PlayerCamera.Mode == LotCameraMode.FirstPerson;
+		mesh.Visible = !firstPerson;
+		if (firstPerson) character.SetOutline(LotOutlineState.None);
+	}
+
+	/// <summary>True while the local character's mesh is visible (false in first person). Test and
+	/// diagnostics observability for the camera modes.</summary>
+	public bool PlayerCharacterMeshVisible()
+	{
+		LotObject character = FindCharacter();
+		if (character == null || character.MeshInstance == null) return true;
+		return character.MeshInstance.Visible;
 	}
 
 	/// <summary>Creates the player camera on first use and keeps it bound to the shared input
@@ -766,6 +812,13 @@ public partial class BuilderScene : Node3D
 			InputSelfTest.Run(this);
 		}
 		InputSelfTest.TickProbe();
+		// The camera suite (milestone 3.10) runs after the input probe finishes.
+		if (!_cameraSuiteDone && InputSelfTest.ProbeDone)
+		{
+			_cameraSuiteDone = true;
+			CameraSelfTest.Run(this);
+		}
+		CameraSelfTest.TickProbe();
 #endif
 	}
 
@@ -808,6 +861,12 @@ public partial class BuilderScene : Node3D
 				"use --quit-after 6000 when verifying headless)");
 		else if (!InputSelfTest.ProbeDone)
 			GD.PushWarning("[BuilderScene] input probe never finished (it needs ~2 s of wall-clock runtime after " +
+				"its suite, so give the run room: --quit-after 6000 verified headless)");
+		if (!_cameraSuiteDone)
+			GD.PushWarning("[BuilderScene] camera suite never ran (run ended before the input probe finished; " +
+				"use --quit-after 6000 when verifying headless)");
+		else if (!CameraSelfTest.ProbeDone)
+			GD.PushWarning("[BuilderScene] camera probe never finished (it needs ~3 s of wall-clock runtime after " +
 				"its suite, so give the run room: --quit-after 6000 verified headless)");
 #endif
 	}

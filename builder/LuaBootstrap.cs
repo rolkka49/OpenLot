@@ -713,6 +713,24 @@ local sandbox = {
         TweenUIRect = function(handle, x, y, w, h, duration, easing)
             return scheduleTweenToken("TweenUIRect", "rect", handle, x, y, w, h, duration, easing)
         end,
+        -- Camera shots (milestone 3.10): a validated wrapper over the bound FlyCamera, returning a
+        -- cancel token that freezes the camera exactly where it is.
+        FlyCamera = function(x, y, z, tx, ty, tz, duration, easing)
+            if type(x) ~= "number" or type(y) ~= "number" or type(z) ~= "number" or
+                type(tx) ~= "number" or type(ty) ~= "number" or type(tz) ~= "number" then
+                error("FlyCamera: the position and target must be numbers", 2)
+            end
+            if type(duration) ~= "number" or duration < 0 then
+                error("FlyCamera: duration must be a number >= 0", 2)
+            end
+            if easing == nil then easing = "linear" end
+            if type(easing) ~= "string" or not EASINGS[easing] then
+                error("FlyCamera: unknown easing '" .. tostring(easing) .. "'", 2)
+            end
+            local id = FlyCamera(x, y, z, tx, ty, tz, duration, easing)
+            if id < 0 then return function() return false end end
+            return function() return CancelCameraShot(id) end
+        end,
     }),
     log = function(message) return Lot.Log(tostring(message)) end,
     -- print is Lua's own verb, rebuilt as a varargs alias of log (the native one is stripped from
