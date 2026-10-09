@@ -1112,8 +1112,13 @@ end
 
 			RunInEnv(runtime, 7,
 				"r8 = (coroutine == nil) and (debug == nil) and (load == nil) and (io == nil) and (os == nil) " +
-				"and (require == nil) and (collectgarbage == nil) and (print == nil) and (luanet == nil)");
+				"and (require == nil) and (collectgarbage == nil) and (luanet == nil)");
 			Check("denied globals are invisible", EnvValue(runtime, 7, "r8") is bool b8 && b8);
+
+			// print is deliberately NOT denied: milestone 2.8 reinstates it as a varargs alias of
+			// log, so a script's print output reaches the Output window instead of stdout.
+			RunInEnv(runtime, 7, "r9 = type(print) == 'function'");
+			Check("print is available as the log alias", EnvValue(runtime, 7, "r9") is bool b9 && b9);
 
 			(ok, err) = RunInEnv(runtime, 7, "setmetatable({}, { __gc = function() end })");
 			Check("__gc metatable rejected (" + err + ")", !ok && err != null && err.Contains("__gc"));

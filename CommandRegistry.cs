@@ -95,6 +95,36 @@ public class CommandRegistry
 
 		RegisterCommand("clear", "Clears the terminal output.", (args) => outputConsole.Clear());
 
+		RegisterCommand("wallpaper", "Sets the desktop wallpaper behind the UI (no argument opens the file browser).", (args) =>
+		{
+			string sub = args.Length > 0 ? args[0].ToLower() : "set";
+
+			if (sub == "clear")
+			{
+				outputConsole.ClearWallpaper();
+				outputConsole.LogLine("Wallpaper cleared. Default background restored.");
+				return;
+			}
+
+			if (sub == "status")
+			{
+				string assetId = WallpaperService.AssetId;
+				outputConsole.LogLine(assetId.Length > 0
+					? $"Wallpaper: {assetId}"
+					: "Wallpaper: none (default background).");
+				return;
+			}
+
+			if (sub == "set")
+			{
+				outputConsole.LogLine("Pick an image in the file browser that just opened.");
+				outputConsole.StartWallpaperPicker();
+				return;
+			}
+
+			outputConsole.LogLine("Usage: wallpaper [set|clear|status]  (no argument opens the file browser)");
+		});
+
 		RegisterCommand("neofetch", "Displays system and platform information.", (args) =>
 		{
 			ulong uptime = Godot.Time.GetTicksMsec() / 1000;
@@ -168,6 +198,7 @@ public class CommandRegistry
 	{
 		{ "openlot", new string[] { "join", "host", "list", "create" } },
 		{ "theme", new string[] { "foreground", "background" } },
+		{ "wallpaper", new string[] { "set", "clear", "status" } },
 		{ "avatar", new string[] { "list", "equip" } },
 	};
 

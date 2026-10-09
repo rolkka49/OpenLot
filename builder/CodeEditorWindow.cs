@@ -22,6 +22,20 @@ public class CodeEditorWindow
 	private double _idleSinceEdit;
 	private bool _focusNextFrame;
 
+	/// <summary>
+	/// Buffer contents captured when the code field gained focus; null when no edit session is open.
+	/// One session (focus in → focus out) becomes one history entry (milestone 2.4), instead of one
+	/// entry per keystroke.
+	/// </summary>
+	private string _pendingEditBefore = null;
+
+	/// <summary>
+	/// True while the code text field owns keyboard focus. Builder's shortcut handler reads it so
+	/// Ctrl+Z stays ImGui's own in-widget undo while the field is active, and only drives the lot
+	/// history when it is not.
+	/// </summary>
+	public bool HasCodeFocus { get; private set; }
+
 	// Cached gutter content, rebuilt only when the line count changes.
 	private int _cachedLineCount = -1;
 	private string _cachedLineNumbers = "";
@@ -46,11 +60,14 @@ public class CodeEditorWindow
 
 	public void Open(string path, string content)
 	{
+		CommitScriptEdit();
 		FlushPendingSave();
 		_activePath = path ?? "";
 		_code = content ?? "";
 		_dirtySinceSave = false;
 		_idleSinceEdit = 0.0;
+		_pendingEditBefore = null;
+		HasCodeFocus = false;
 		UpdateLineNumbers();
 		IsOpen = true;
 		_focusNextFrame = true;
@@ -58,8 +75,11 @@ public class CodeEditorWindow
 
 	public void Close()
 	{
+		// Closing must not silently drop the last edit session: commit it as a history entry first.
+		CommitScriptEdit();
 		FlushPendingSave();
 		IsOpen = false;
+		HasCodeFocus = false;
 	}
 
 	/// <summary>Called from Builder._Process — debounced save for active edits.</summary>
@@ -93,6 +113,74 @@ public class CodeEditorWindow
 		_dirtySinceSave = false;
 	}
 
+	/// <summary>
+	/// Turns a finished edit session (focus in → focus out, or window close) into ONE history entry.
+	/// Recorded only when the edited script's node is selected (milestone 2.4): otherwise the file
+	/// is still saved by the debounce, but the lot history is not touched — the editor is just a
+	/// buffer then. A no-op when nothing changed or no session was open.
+	/// </summary>
+	private void CommitScriptEdit()
+	{
+		string before = _pendingEditBefore;
+		_pendingEditBefore = null;
+		if (before == null || _activePath.Length == 0 || before == _code) return;
+		if (!ShouldRecordScriptEdit(_builder, _activePath)) return;
+		_builder.History.Push(new ScriptEditCommand(_activePath, before, _code));
+	}
+
+	/// <summary>
+	/// Applies a script buffer by path (the apply half of <see cref="ScriptEditCommand"/>). Refuses
+	/// to recreate a file that no longer exists, so undoing an edit to a deleted script is a no-op
+	/// rather than resurrecting a deleted asset. When the editor is showing that path its buffer is
+	/// replaced and any pending session is dropped — an undo/redo is not itself a new edit.
+	/// </summary>
+	public void ApplyCode(string path, string code)
+	{
+		if (string.IsNullOrEmpty(path)) return;
+		if (!Godot.FileAccess.FileExists(path))
+		{
+			Godot.GD.PushWarning("[CodeEditor] script no longer exists; undo/redo skipped: " + path);
+			LotLog.Warn("editor", "script no longer exists; undo/redo skipped: " + path);
+			return;
+		}
+
+		_builder.Scripts.SaveScript(path, code ?? "");
+		if (_activePath != path) return;
+
+		_code = code ?? "";
+		_dirtySinceSave = false;
+		_idleSinceEdit = 0.0;
+		_pendingEditBefore = null;
+		UpdateLineNumbers();
+	}
+
+	/// <summary>
+	/// The "only if the script is selected" rule for recording a code edit. Pure over the lot tree
+	/// and the selection, so <see cref="EditorWorkflowSelfTest"/> can pin it without an ImGui frame.
+	/// </summary>
+	public static bool ShouldRecordScriptEdit(Builder builder, string path)
+	{
+		if (builder == null || string.IsNullOrEmpty(path) || builder.Scene == null || builder.Selection == null) return false;
+		LotScriptNode node = FindScriptNode(builder.Scene.LotRoot, path);
+		if (node == null) node = FindScriptNode(builder.Scene.LotUIRoot, path);
+		return node != null && builder.Selection.IsSelected(node);
+	}
+
+	/// <summary>Depth-first search for the hierarchy placeholder whose ScriptPath matches.</summary>
+	public static LotScriptNode FindScriptNode(Node root, string path)
+	{
+		if (root == null) return null;
+		LotScriptNode script = root as LotScriptNode;
+		if (script != null && script.ScriptPath == path) return script;
+		int count = root.GetChildCount();
+		for (int i = 0; i < count; i++)
+		{
+			LotScriptNode found = FindScriptNode(root.GetChild(i), path);
+			if (found != null) return found;
+		}
+		return null;
+	}
+
 	public void Draw(Builder builder)
 	{
 		if (_focusNextFrame)
@@ -103,9 +191,11 @@ public class CodeEditorWindow
 		ImGui.SetNextWindowSize(720f, 480f, ImGui.CondFirstUseEver);
 		ImGui.SetNextWindowPos(320f, 120f, ImGui.CondFirstUseEver);
 
-		bool open = ImGui.Begin("Code Editor (Lua)");
+		bool open = ImGui.Begin("Code Editor (Lua)", EditorChrome.PanelWindowFlags);
 		if (!open)
 		{
+			// The window is collapsed: nothing is drawing the field, so it cannot hold focus.
+			HasCodeFocus = false;
 			ImGui.End();
 			return;
 		}
@@ -149,14 +239,20 @@ public class CodeEditorWindow
 		{
 			Vector2 avail = ImGui.GetContentRegionAvail();
 			string edited = ImGui.InputTextMultiline("##code", GetDisplayCode(), avail, BufferCapacity, ImGui.InputTextAllowTabInput);
+			// Focus in (or the first keystroke) opens an edit session: remember the buffer as it was
+			// so the commit below can turn the whole session into one undo entry.
+			if (ImGui.IsItemActivated() && _pendingEditBefore == null)
+				_pendingEditBefore = _code;
 			if (edited != _code)
 			{
 				_code = edited;
 				_dirtySinceSave = true;
 				_idleSinceEdit = 0.0;
-				_builder.MarkDirty();
 				UpdateLineNumbers();
 			}
+			// Builder's Ctrl+Z arbitration reads this next frame (same one-frame pattern as the
+			// gizmo/drag WantsMouse flags).
+			HasCodeFocus = ImGui.IsItemActive();
 			// ImGui single/multi-line inputs clear their active id on Enter; after-edit
 			// deactivation is the closest commit point the wrapper can reach.
 			committed = ImGui.IsItemDeactivatedAfterEdit();
@@ -164,7 +260,11 @@ public class CodeEditorWindow
 			ImGui.EndChild();
 		}
 
-		if (committed) FlushPendingSave();
+		if (committed)
+		{
+			FlushPendingSave();
+			CommitScriptEdit();
+		}
 		ImGui.End();
 	}
 

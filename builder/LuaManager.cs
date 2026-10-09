@@ -21,7 +21,18 @@ public class LuaManager
 		"function sphere(x, y, z) return Lot.SpawnSphere(x or 0, y or 0, z or 0) end\n" +
 		"function cylinder(x, y, z) return Lot.SpawnCylinder(x or 0, y or 0, z or 0) end\n" +
 		"function capsule(x, y, z) return Lot.SpawnCapsule(x or 0, y or 0, z or 0) end\n" +
-		"function log(msg) Lot.Log(tostring(msg)) end\n";
+		"function decal(host) return Lot.SpawnDecal(host or 0) end\n" +
+		"function log(msg) Lot.Log(tostring(msg)) end\n" +
+		// print is reinstated for the scratch path (code editor and command strip): LuaBootstrap
+		// strips the native one just above, so this re-defines it as a varargs alias of log with
+		// Lua's own tab-joined formatting. Defined AFTER LuaBootstrap.Apply, which is what makes
+		// the ordering safe.
+		"function print(...)\n" +
+		"    local n = select('#', ...)\n" +
+		"    local parts = {}\n" +
+		"    for i = 1, n do parts[i] = tostring((select(i, ...))) end\n" +
+		"    Lot.Log(table.concat(parts, '\\t'))\n" +
+		"end\n";
 
 	public static LuaManager Instance { get; } = new LuaManager();
 
@@ -125,6 +136,7 @@ public class LuaManager
 			_watchdog = null;
 			IsRuntimeAvailable = false;
 			LastError = "Lua init failed: " + ex.Message;
+			LotLog.Error("lua", LastError);
 			GD.PushError("[LuaManager] " + LastError);
 		}
 	}
@@ -265,6 +277,8 @@ public class LuaManager
 			_scriptingSuspended = true;
 			SuspensionReason = _rebuildTimes.Count + " VM rebuilds within " + RebuildWindowSeconds +
 				"s (limit " + MaxRebuildsPerWindow + "): most likely a script exhausting the memory cap";
+			LotLog.Error("script", "scripting suspended — " + SuspensionReason
+				+ ". Scripts are disabled and will not reload until the lot is reloaded.");
 			GD.PushError(MarkExpected("[LuaManager] scripting SUSPENDED — " + SuspensionReason +
 				". Scripts are disabled and will not reload until the lot is reloaded."));
 			return;

@@ -117,6 +117,7 @@ You are reviewing OpenLot's codebase (Godot 4 + C#, with a Lua scripting layer b
 
 Legend for difficulty tags carried over from the original planning pass:
 🔴 Red = extremely hard / needs research · 🟠 Orange = Rolkka organizes, AI translates to C# · 🟡 Yellow = repetitive, AI handles smoothly · 🟩 Green = only Rolkka, fine-tuning/feel
+Status tags, separate from difficulty ratings: ⛔️ Blocked = waits on another milestone (named inline) · ⭕️ Needs expansion = the milestone is under-specified and wants a detail pass before it can be built
 
 ---
 
@@ -138,33 +139,83 @@ Legend for difficulty tags carried over from the original planning pass:
 - [x] Gizmos (move/rotate/scale/select) — use ImGuizmo or a close port rather than reinventing gizmo math
 - [X] Object selection/sorting UI
 - [x] GUI Gizmos/tools
-- [ ] Gizmo snapping: toggleable increment snap for move (grid), rotate (angle) and scale, with configurable increments and a modifier-key override; the snap config lives in the toolbox (`GizmoMath.Snap` already exists — this is wiring + config UI, not new math)
+- [X] Gizmo snapping: toggleable increment snap for move (grid), rotate (angle) and scale, with configurable increments and a modifier-key override; the snap config lives in the toolbox (`GizmoMath.Snap` already exists — this is wiring + config UI, not new math)
 **Acceptance criteria:** A creator can enter build mode, fly around with freecam, select an object, and move/rotate/scale it with visible gizmo handles.
 **Difficulty:** 🟠 moving · 🔴 smooth gizmos · 🟡 GUI creation tools · 🟡 increment snapping
 
 ### Milestone 2.3 — Inspector property system
-- [ ] Scrollable Inspector section so long property lists stay usable
-- [ ] Typed property widgets: checkbox (bool), dropdown (enum/choice), plus the existing numeric/text fields
-- [ ] Per-object property set, starting with: Anchored, CanCollide, Texture
-- [ ] Background picture property: apply an image as the lot background instead of the procedural sky. A file browser pops up and the user browses to the image; a clear action returns to the default sky
-- [ ] Semantics for the two new part properties settled in code comments before the widgets land — what `CanCollide = false` does to the body (`CollisionShape3D.Disabled` vs. removing the shape), and what "Anchored" actually blocks (editor drag only, or every position write including Lua `SetPosition`)
-- [ ] Properties are exposed through the bound Lua API, so scripts can read and set them (respecting the §1.1 boundary: no direct Godot access)
-- [ ] Property widgets are data-driven (a property declares its type and options), so adding a new property doesn't require new Inspector UI code
+- [x] Scrollable Inspector section so long property lists stay usable (header stays pinned; the transform + property rows live in a scrolling child)
+- [x] Typed property widgets: checkbox (bool), dropdown (enum/choice), plus the existing numeric/text fields
+- [x] Per-object property set, starting with: Anchored, CanCollide, Texture
+- [x] 2D wallpaper: `wallpaper` command opens a file browser and draws the image behind the ImGui dockspace (Terminal + Builder chrome, **not** the 3D sky); `wallpaper clear` returns to the default background. Drawn as an input-less full-viewport window under the dockspace. **The choice is remembered on disk** (`user://openlot_settings.cfg`, `[wallpaper] source_path`) and restored by `WallpaperService.LoadPersistedSettings()` from `Terminal._Ready` (and idempotently from `Builder._Ready`), so it survives both scene changes and a restart; a stored path whose file has gone is forgotten with a warning. That config file is the seed of §5.4's client settings rather than a second format. (Builder also gets a View menu entry.) The part Texture property and the wallpaper share one image-loading path (`LotTextureCache`) via `ImageFilePicker`. The loader sniffs the file's magic bytes and dispatches to the matching Godot buffer loader instead of `Image.LoadFromFile`, because that one picks by file **extension**: a downloaded WebP/JPEG named `.png` made Godot's PNG driver reject the file and print three engine ERROR blocks to the console. Sniffing fixes those files (they now load) and makes a non-image a single readable message with no engine noise. `OPENLOT_TEST_IMAGE=<path>` opts in to a check against a real file on this machine.
+- [x] Semantics settled in code comments next to the storage. `CanCollide = false` moves the collision body to a reserved no-collide layer rather than disabling/removing the shape, because a disabled shape vanishes from raycasts and would make the part unselectable and undraggable in the editor — the milestone requires the opposite. `Anchored` is a **physics** property (anchored = stays in place, unanchored = affected by gravity in a player session), **not** a write lock: scripts may still position an anchored part. In Build mode both states stay put; gravity itself waits on §3.6's dynamic-body layer.
+- [x] Properties are exposed through the bound Lua API, so scripts can read and set them (respecting the §1.1 boundary: no direct Godot access). Verb-first verbs now (`SetAnchored`/`IsAnchored`, `SetCanCollide`/`GetCanCollide`, `SetTexture`/`GetTexture`); the gated generic accessor lands later.
+- [x] Property widgets are data-driven (a property declares its type and options), so adding a new property doesn't require new Inspector UI code. `LotPropertyRegistry` is the one declaration table, `Register()` is the Tier-2 plugin entry point, and `LotPropertyService` is the single write path (future §2.4 undo and §4.1 save hook here).
 **Acceptance criteria:** A creator can select an object, scroll the Inspector, toggle Anchored/CanCollide with checkboxes, pick a Texture from a dropdown, and see the change take effect in the scene and in Lua.
-**Difficulty:** 🟡 scrollable Inspector · 🟡 typed widgets · 🟠 data-driven property declaration · 🟠 Anchored/CanCollide semantics · 🔴 Texture + background picture (shared image-loading path, seeds §5.2)
+**Verification:** `WallpaperSelfTest` (55 checks, including the on-disk persistence contract and an opt-in `OPENLOT_TEST_IMAGE=<path>` check against a real file) + `LotPropertySelfTest` (39 checks, including one that drives the real bound Lua API), both headless under `#if DEBUG` from `BuilderScene._Ready`; the 2D wallpaper's on-screen composition is a rendering result and is checked by eye in the running client.
+**Difficulty:** 🟡 scrollable Inspector · 🟡 typed widgets · 🟠 data-driven property declaration · 🟠 Anchored/CanCollide semantics · 🔴 Texture + wallpaper (shared image-loading path, seeds §6.2 / §14.6)
 
 ### Milestone 2.4 — Editor workflow
-- [ ] Undo/redo across gizmo drags, Inspector edits and hierarchy operations (command stack; `MarkDirty` is the only history today)
-- [ ] Drag objects in the hierarchy panel to reorder, and drag one object into another to reparent (`Reparent` exists; the panel has clicks + marquee only)
-- [ ] Autosave and crash recovery — **depends on §8.1's `.lot` format**; nothing exists to serialize yet
-**Acceptance criteria:** A creator can undo and redo any edit, reorder and reparent by dragging in the hierarchy, and recover their lot after a crash or restart without losing work.
-**Difficulty:** 🟠 undo/redo · 🟠 hierarchy drag/reparent · 🔴 autosave/crash recovery (blocked on §8.1)
+- [x] Undo/redo across gizmo drags, Inspector edits and hierarchy operations (command stack; `MarkDirty` is the only history today). Commands are pushed by the existing single write paths (`BuilderScene` spawn/delete/duplicate/reorder/reparent, `LotPropertyService`, `ScriptManager`), commit on release/`IsItemDeactivatedAfterEdit`, and coalesce per drag rather than per frame
+- [x] Code-editor edits join the same stack (`CodeEditorWindow`): one entry per editing session, committed when focus leaves the field and on window close, holding `(path, before, after)` and applying through a single `CodeEditorWindow.ApplyCode` that writes via `ScriptManager.SaveScript`. Recorded **only while the edited script's node is selected** — otherwise the editor stays a plain file buffer (still auto-saved). While the field has focus Ctrl+Z remains ImGui's own in-widget undo and the lot stack ignores it (`Builder._UnhandledInput` gated on an `IsItemActive`-derived focus flag, the same one-frame-flag pattern as `WantsMouse`). Entries whose file is gone (script deleted/renamed) are dropped rather than recreating a deleted asset. Undo/redo of a script edit does not re-run the lot — scripts still load at lot load (§3.2)
+- [x] Drag objects in the hierarchy panel to reorder, and drag one object into another to reparent (`Reparent` exists; the panel had clicks + marquee only; ImGui drag-drop sources/targets are already in the wrapper). Rejects drops into a node's own subtree, onto internal children (`InternalChildMeta`) or `LotScriptNode`s, and across the `LotRoot`/`LotUIRoot` boundary. While a drag is in flight the hovered row shows where it will land — the row is tinted and outlined when the node will become its child, an insertion line is drawn on the edge it will be inserted at (so "between" vs "into" is never ambiguous), and an invalid target shows nothing at all
+*(Autosave and crash recovery live in §4.1 (Phase 1): a periodic autosave to `user://autosave.lot`, a crash marker and a boot-time recovery prompt — on the same `.lot` writer a manual save uses (§4.2).)*
+**Implementation status:** landed. `builder/EditorUndo.cs` holds `IEditorCommand`, `EditorHistory` and the node-lifetime / transform / script-edit commands; `builder/HierarchyDrop.cs` holds the pure drop rules; the wiring runs through `Builder` (Edit menu, Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y, save-point dirty tracking), `BuilderScene`, `InspectorPanel`, `GizmoController`, `PartDragController`, `UiGizmoController`, `ToolboxPanel`, `ContextMenuUI`, `ScriptManager`, `CodeEditorWindow` and the `LotPropertyService` write path. Verified headless by `EditorWorkflowSelfTest` (82 checks) alongside `GizmoSelfTest` 176, `NetSelfTest` 169 and `NetIntegrationTest` 59 — all 0 failures. The ImGui drag gesture's on-screen feel is a rendering result checked by eye in the running client; its resolution rules are unit-tested.
+**Hierarchy interaction model (fixed alongside §4.1's secret section):** the panel is begun with `ImGui.WindowNoMove` and re-grants movement through `builder/TitleBarWindowDrag.cs`, so the window moves **only by its title bar** and a drag in the body is free for the marquee. That is not a preference: ImGui's own "move from title bar only" switch is an `io` config the vendored addon does not expose (the same limitation `EditorChrome` documents for dock-node flags), so without it a body press could move the window instead of starting the gesture. **Each row is split in half**: the left half is the interactive item (select, drag, right-click) and the right half belongs to the marquee. This split is required, not cosmetic — `ImGui.Selectable` **auto-spans the full available width when its size is 0**, so a row item otherwise covers its whole line, and a press beside the title grabbed the row (starting a node drag) instead of starting a marquee; the addon's `SelectableSpanAvailWidth` is a stray constant (1<<24 is not a real ImGui selectable flag), so removing it changed nothing. Leaf rows are therefore sized to the left half explicitly (`Selectable(label, selected, 0, size)`), while tree rows — whose `TreeNodeEx` takes no size — are flagged `AllowOverlap` with a filler `InvisibleButton` laid over their right half (`DrawRowMarqueeZone`), a button that carries no behaviour and exists only so the press belongs to neither the row nor the window. The marquee's start test is explicit geometry (`IsMarqueePress`: inside a right-hand band, or over empty space) rather than "nothing is hovered", because the filler button is an item. The marquee's *hit* rects are still widened to the panel's right edge (`RecordRow`), so dragging a selection box across a row line still selects that row.
+**Acceptance criteria:** A creator can undo and redo any edit — including a script edit made with that script selected — and reorder and reparent by dragging in the hierarchy.
+**Difficulty:** 🟠 undo/redo (incl. code-editor session entries) · 🟠 hierarchy drag/reparent
+
+*(Editor chrome, decided alongside the 2.4 work: every terminal window and builder panel is begun with `WindowNoDocking | WindowNoCollapse` — `builder/EditorChrome.cs`. ImGui's docked "maximize" gesture is a double-click on a dock node's tab bar, which hides that tab bar and leaves the panel filling the whole dockspace with no tab left to click back to normal; the addon's C# wrapper exposes no dock-node flags and no IO config, so the gesture cannot be switched off directly. With no dock node there is no tab bar to double-click, which removes it outright, and `NoCollapse` does the same for a floating window's title-bar double-click — so no window can be blown up or folded away. Cost: panels can no longer be dragged into dock splits (they stay freely movable and resizable, and their positions still persist in `user://imgui.ini`). Restoring docking while keeping the gesture disabled means patching the vendored GDExtension.)*
 
 ### Milestone 2.5 — Lighting and environment settings
-- [ ] Time of day (sun angle + colour), fog, and sky presets in the creation environment, replacing the fixed procedural sky (`BuilderScene.BuildViewport`)
-- [ ] Environment settings persisted as lot metadata — **depends on §8.1**
+- [x] Time of day (sun angle + colour), fog, and sky presets in the creation environment, replacing the fixed procedural sky (`BuilderScene.BuildViewport`). `builder/LotEnvironment.cs` holds the session-only settings (`LotEnvironmentSettings`), the four presets (Day/Sunset/Night/Overcast), the pure sun math and the time-of-day **sky curve**; `BuilderScene.ApplyEnvironment` is the single writer to Godot's Environment / ProceduralSkyMaterial / DirectionalLight3D; `builder/EnvironmentControls.cs` draws the editor inline in the Builder's **View → Environment** menu (no separate panel — it is a view setting, next to the wallpaper). Presets set the light/sky/fog together; the sun angle is either the manual elevation/azimuth or driven by the time-of-day clock, whichever the creator selected. Day reproduces the removed hardcoded sky exactly, so an untouched builder looks unchanged. Deliberately **not** on the undo stack and **not** marked as an unsaved lot change: it is a view setting like the camera, not an edit to the lot's objects
+- [x] **The sky must actually change with the clock** (follow-up fix). Godot's `ProceduralSkyMaterial` draws its sun disc from the scene's first `DirectionalLight3D` but keeps its own four colours **static** — it has no time-of-day behaviour — so the first cut moved the sun through a fixed sky. `LotEnvironmentSettings.SkyPaletteFromTime` now keyframes the sky/ground gradient + sun colour/energy over 24h (ten stops, the 12:00 stop being the Day preset's own sky so noon stays exact) and `Effective()` substitutes them while the clock is on; the stored manual colours are never overwritten, so unticking the clock restores them. Dusk is intentionally warmer and longer than dawn (warm stops at 18:00 **and** 19:30 vs dawn's single 06:30), and the night plateau is floored so the lot stays editable at midnight. While the clock is on its sky/sun-colour widgets are greyed out, exactly like the manual angle sliders. *(`PhysicalSkyMaterial` was the alternative — a real Preetham daylight model — but it would change the Day look, has one ground colour instead of a horizon split, and makes night genuinely black; kept for a later milestone)*
+- [x] Environment settings persisted as lot metadata — **done, via §4.1 + §4.2**: `LotEnvironmentSettings` is serialized into the `.lot` archive's `lot.json` next to the scene (`LotSave.Write` sets `LotDocument.Environment`) and re-applied on load (`BuilderScene.ReplaceLotFromArchive` calls `ApplyEnvironment`), so the builder and a loaded/played lot agree on lighting. A lot carrying no environment block resets to the default rather than inheriting the previous lot's sky.
 **Acceptance criteria:** A creator sets time of day, fog and a sky preset in build mode and sees the same lighting when the lot is loaded and played.
-**Difficulty:** 🟠 environment controls · 🟠 persistence (blocked on §8.1)
+**Verification:** `EnvironmentSelfTest` (39 checks: the "Day == the original fixed sky" contract, preset coherence, the time-of-day sun curve including the light-rotation sign convention, and the sky-palette curve — noon identical to Day, night dark but editable, dusk warmer for longer than dawn, plus the `Effective` snapshot contract), headless under `#if DEBUG` from `BuilderScene._Ready`; the on-screen result (sky colours, shadow direction, fog) is a rendering outcome checked by eye in the running client.
+**Difficulty:** 🟠 environment controls · 🟠 persistence (via §4.1 + §4.2 — landed)
+**Implementation status:** fully landed. The editor half shipped with the milestone, and the "same lighting after load/play" half completed once §4.1 + §4.2 landed: `LotEnvironmentSettings` serializes into `lot.json` and re-applies on load (see the checklist item above), so the settings survive a save/reload and a Test-mode round trip.
+
+### Milestone 2.6 — Part surface decal system
+- [x] Per-face decals: logos, signs and textures placed on a **single face** of a part. The §2.3 Texture property swaps the material for the *whole* part; this is the per-face counterpart, and it is a **scene object** (`LotObjectKind.Decal`) inserted into the part it decorates — spawned from the Toolbox's Decal section **and** the hierarchy context menu's "Insert Decal" (both need a selected host), parented to its host part, and addressable by handle like any other object (§3.3). A decal is deliberately not a primitive: no collision body, no outline hull, a shared unit `QuadMesh`, and a transform **derived** from its face/offset/scale against the host (`builder/DecalMath.cs` + `LotObject.RefreshDecalTransform`, with `_EnterTree` re-deriving on attach/reparent/restore)
+- [x] The decal carries its own data-driven properties through the §2.3 `LotPropertyRegistry` (face, image, offset U/V, scale U/V, opacity), so the Inspector gets the widgets with no new UI code and the Lua verbs (`SetDecalFace` / `SetDecalTexture` / `SetDecalOffset` / `SetDecalScale` / `SetDecalOpacity` / `SpawnDecal` + getters) fall out of the same declaration per §2.2. The part properties (anchored/collision group/whole-part texture) are not offered on a decal, and vice versa — `IsPart` and `IsDecal` split the declaration table
+- [x] Rendering: a quad on the chosen face, offset along the face normal to avoid z-fighting (proportional lift, `DecalMath.Lift`) and **clipped by construction** — `|offset| + scale/2 <= 0.5` in face fractions, so the patch can never grow past the face edge or bleed onto a neighbour. It follows the parent when the part is moved, rotated, resized or has its own material changed, because it **is** a child: the local numbers are scale-free (the host scale is divided out and multiplied back at render), so a host resize keeps the patch at the same fraction of the face with no per-frame work
+- [x] The patch is **adjustable by dragging**: with a decal selected, a drag on its host slides the image across the face (`PartDragController`'s decal slide — cursor ray meets the face plane, the grab offset is preserved, the write goes through the property descriptors and the whole drag is one "Move Decal" history entry). The face itself is switched from the Inspector dropdown or `SetDecalFace`, and the image's transparent areas stay transparent (`StandardMaterial3D` alpha transparency, unshaded)
+- [x] Texture picking reuses the existing image path (`ImageFilePicker` + `LotTextureCache`, §2.3) — same magic-byte sniffing, same on-disk cache, same reference counting (`SetTexture`/`ReleaseTexture` are shared with the part texture field) — rather than a second loader
+- [x] Decals serialize with the lot (`lot.json`, §4.1) as their own `"decal"` kind tag with their parent pointing at the host, and their image bytes ship in the archive's `assets/` (read through `LotVFS`, §4.1) via `LotArchiveCollect`/`LotSceneLoad`'s shared asset-id lookup — so a saved lot carries its decals and a decal never points at a file only the author has
+**Acceptance criteria:** A creator inserts a decal into a part, picks a face and a texture, sees the logo on that one face only, saves the lot, and reloads it on another machine with the decal and its embedded texture intact.
+**Difficulty:** 🟠 face targeting + z-fighting/clipping · 🟡 property wiring (reuses 2.3) · 🟠 persistence (via §4.1)
+**Implementation status:** landed and verified headless; the on-face UI step (see below) followed in the same milestone. Implementation notes worth keeping: the face vocabulary is `+Z/-Z/+X/-X/+Y/-Y` (default +Z) with axes ordered so `u x v == normal` (a proper rotation, never a mirrored image); a non-uniformly scaled host is compensated exactly because every face axis is a signed part axis, and a *mirrored* host (negative scale component) is deliberately not compensated (documented in `DecalMath`); curved surfaces place on the bounding-box face (a `Sphere/Cylinder/Capsule` patch floats just off the curve) — true surface conform is out of scope; `SetAnchored`/`SetCanCollide`/`SetCollisionGroup` remain callable on a decal for signature safety but do nothing (no body), and the gizmo is gated off for a decal selection because its transform is derived.
+**The Decal tool (follow-up fix).** The first cut could only slide a decal that had been selected in the Hierarchy first, and the face was switched from an Inspector dropdown — which read as "there is no way to move it or pick a face". Now `GizmoMode.Decal` is a first-class tool beside Select/Move/Rotate/Scale, and its click means *this face*: the raycast's surface normal names a face (`DecalMath.FaceFromNormal`), a click inside an existing panel picks it up and starts the slide, and a click on bare surface inserts a panel centred on the clicked spot (`PartDragController.HandleDecalPress` → `BuilderScene.InsertDecal(builder, host, face, offsetU, offsetV)`). A new decal opens the image browser immediately, so it is never left a blank white square. The toolbox keeps the tool switcher reachable with a decal selected, and both the toolbox and the hierarchy context menu route through the same insert path.
+**On-face UI content (the user's extension of this milestone).** A decal is now a face-mounted **panel** whose `Content` chooses what it draws — `Image` (the picture patch), `Text`, `Button`, `Scrollbar` (`DecalContent` + `DecalMath.ContentNames`). Rendering is one `Label3D` and one thumb quad, both internal children of the decal (`InternalChildMeta`, invisible to the hierarchy/walk/snapshots): Text hides the quad and shows the label; Button shows the surface plus a contrast-coloured label (`DecalMath.LabelColorFor`); Scrollbar shows the track plus a thumb that rides `decal_scroll` (`DecalMath.ScrollThumbOffset`). The label is sized in the panel's own unit frame (one line = FontSize/160 of the panel height, wrapping at 90%), so text and panel scale together with the part. `Label3D` is a **deliberate borrow from Godot's 3D layer** — the in-house ImGui UI is screen-space and cannot put glyphs on a face — and it is marked as an internal implementation detail. The property system gained its `Text` kind (descriptor accessors, Inspector `InputText` field with the same one-entry-per-edit-session undo rule, capture/load/snapshot plumbing), which §5.3's lot-UI labels reuse. Lua grew `SetDecalContent`/`SetDecalText`/`SetDecalScroll`/`SetDecalFontSize` + getters. **Button and Scrollbar are visuals until in-session input routing lands**: a click reaching a script is the shared §3.7/§5.2/§5.3 blocker (player-originated interaction), so wiring it here would be the fabricated plumbing that section deliberately refuses; a script can already drive the visuals (`SetDecalText`, `SetDecalScroll`).
+**Verification:** `DecalSelfTest` (100 checks, 0 failures), headless under `#if DEBUG` from `BuilderScene._Ready`: the face table and handedness, the face-from-normal and covers-point rules behind the tool, the clamps, unit and scaled-host placement math with the render round-trip, the live-host contract (attach placement, face change, clamping, riding host motion, the un-refreshed-resize property), the panel contents (which of quad/label/thumb is visible per content, text and font plumbing, thumb position, the contrast rule), the declaration split, a capture → restore with the host link / authored values / content / text / image reference intact, and every bound Lua verb driven through the real VM. Alongside it, `LotPropertySelfTest` grew its accessor check to Float and Text, and `LotArchiveSelfTest`'s kind-tag round-trip covers `"decal"` (235 checks). The on-screen result (a logo or a button sitting on one face, the slide gesture, transparency, the label's size) is a rendering outcome checked by eye in the running client, the project's usual split. **Known gaps, stated rather than implied:** a mid-session host *scale* change does not re-derive the tiny normal lift until the next refresh (the panel itself stays correct); `Secret_Asset/`-routed decal images follow the same routing rule as part textures; Button/Scrollbar take no input yet (above); the drag's grab-relative feel and the label's exact line metrics are eye-checked.
+
+
+### Milestone 2.7 — Precise scale gizmo (6-handle)
+*The §2.2 scale tool ported Im3d's three axis-line handles, whose drags grow the part from its center — both faces move at once, which is usable for overall sizing but cannot stretch one side precisely. This milestone gives scale its own per-face handles (the six spheres) while leaving the translate/rotate tools and the rest of the gizmo stack untouched.*
+- [x] Six face handles: `+X / -X / +Y / -Y / +Z / -Z` spheres centered on the part's bounds faces, replacing the three axis-line handles; the center uniform dot (`HandleUniformScale`) stays as the "grow all axes" affordance, so the mode keeps one handle set for both overall and one-sided sizing. Mesh-less targets (a model group) keep the Im3d axis lines — there are no faces to sphere
+- [x] Handle placement is bounds-relative — the spheres sit on the part's actual faces (computed from the mesh's AABB in the part's local frame, so a rotated part's handles follow its faces) — but each sphere is drawn and hit-tested at a screen-constant radius via the existing `GizmoContext.PixelsToWorldSize`, so picking is stable whether the part is tiny or building-sized. The pick bound grows to the mesh's world half-extent for meshed targets: the Im3d pick sphere only covers its own origin-local handles, and a face sphere on a large part sits far outside it
+- [x] Anchored-side drag: dragging a sphere moves only that face — the axis component scales while the opposite face stays where it is, which is the precision the center drag cannot give. The offset is the cursor's in-plane motion along the projected face normal, snapped through `GizmoMath.Snap` with the §2.2 scale increment and `Alt` hold-to-invert (`GizmoController.ResolveSnap`, already resolved once per frame in `FillAppData`); the drag writes scale **and** the compensating position shift together, and the minimum-scale clamp is **`1e-4f`** (the milestone's chosen floor; the Im3d axis path keeps its own 1e-3 relative floor, pinned side by side in the self-test)
+- [x] Sign conventions pinned in implementation notes next to the math: a `-X / -Y / -Z` sphere grows its own side outward (its normal is the handle's axis, not the part's), and the `FlipGizmoWhenBehind` axis flip the line handles do is deliberately **not** applied — a face handle that teleported to the far side of the part when the camera crossed the horizon would be unusable
+- [x] Pick/feedback through the existing state machine: new handle ids outside today's `0-8` set (faces are `10..15`), `GizmoColors.Highlight` on hot/active, and the translation handles' fade as the face normal turns toward the viewer (`GizmoMath.Remap`) so a face you are looking straight at does not swallow its handle — floored at 0.2 alpha so a face-on sphere stays grabbable
+- [x] Undo/drag lifecycle unchanged: the whole drag is still one history entry committed on release, `WantsMouse` still gates the viewport's background click, `ResetInteraction` still drops handle state on selection/tool change — a face scale restores the exact pre-drag local transform, position shift included. **Reading this contract closely found a pre-existing hole and fixed it here:** `RunGizmo` only called `UpdateDragHistory` when the frame produced a change, but a drag's LAST frame is the release frame — which reports no change — so the entry sat uncommitted until some later selection/tool change, and a following drag could fold into the previous one. The call now also runs while an entry is open (`changed || _wasDragging`), so the commit lands on release for every handle, face spheres and Im3d axes alike
+**Acceptance criteria:** A creator selects a part, sees six face spheres plus the center dot, drags one sphere and stretches only that side (opposite face stays put, snap increment and `Alt` override behaving as move/rotate do), undoes the whole drag in one Ctrl+Z, and the same works on a rotated, non-uniformly scaled part without the mesh jumping.
+**Difficulty:** 🟠 handle math (bounds placement, anchored-side offset, sign conventions) · 🟡 draw/hit-test reuse · 🟠 snap/undo wiring · 🟡 tests
+**Implementation status:** landed and verified headless. `builder/FaceScaleMath.cs` holds the pure math (handle ids 10..15, face axis/sign tables shared with the §2.6 decal vocabulary, mesh-bounds face centres re-derived every frame, world half extents for the pick bound, the drag arithmetic) plus `FaceScaleBehavior`, the original (non-Im3d) hot/active logic — kept out of `GizmoBehavior` so that file keeps its "readable side by side with im3d.cpp" property. `GizmoController.RunScaleGizmo` now takes a `ref position` beside the scale (the face drag shifts the origin, which is exactly what anchors the opposite face), draws the six spheres for meshed targets, and keeps the axis lines for targets without a mesh. **Two design decisions worth keeping, both discovered while implementing:** (1) the drag measures the cursor's motion on a camera-facing plane through the press-time face centre, along the *projected* face normal — deliberately NOT the Im3d axis-line closest-approach scheme, which is ill-conditioned exactly when the view runs down the normal (looking straight at a face) and would fling the scale to an extreme; a head-on view here simply yields no motion until the camera is angled, and the self-test pins that as the regression. (2) The pick bound grows to the part's world half-extent, because Im3d's pick sphere only covers handles that sit next to the origin while a face sphere sits on the surface — far outside it on a large part. Every drag frame re-derives the spheres from the live transform, so a rotated, non-uniformly scaled part's handles sit on its visual faces with no cached positions to go stale.
+**Verification:** `GizmoSelfTest` grew to 228 checks (0 failures), headless under `#if DEBUG`: the face table and handle ids, bounds→face-centre derivation (unrotated, scaled, rotated 90°, non-uniform scale), the pick-bound half extents (including a 45° sliver), the projected-direction rule (face-on → zero, 45° → 45°), per-face drag arithmetic with the opposite-face-fixed contract in both directions, snap, the 1e-4 floor with its consistent shift, degenerate (zero-thickness) refusal, the behavior end to end (hover → capture → drag → hold → drag further → release with hand-checkable numbers on the +Y face), and the head-on no-jump regression. The on-screen result (sphere placement, the fade, drag feel on a rotated non-uniform part) is a rendering outcome checked by eye in the running client, the project's usual split. **Known gaps, stated rather than implied:** a mirrored (negative-scale) host is not compensated — the same declared limitation `DecalMath` carries; a camera rotated *during* a drag keeps the captured measurement plane (the drag does not re-fit mid-gesture); and the axis-line handles remain for mesh-less targets rather than being replaced outright.
+**First-client fix round (the drift bug).** The first cut applied the drag as `position += offset` while the offset was already the cursor's *total* movement since press, so every frame re-added it: the part ran away from the cursor ("doesn't follow the mouse, just drifts") and the runaway motion buried the scale change ("doesn't even scale"). Both outputs are now **absolute from the press-time part** — `FaceScaleBehavior` returns the press origin plus the total offset (and the absolute scale), and the controller *assigns* them — so holding the cursor still holds the part still, and dragging further tracks 1:1. The behaviour test pins it: same ray on consecutive frames must produce identical outputs, and a further drag must land on the press origin plus the new total, not the sum of the frames' offsets. *(Manual call-outs from the same round: the freecam's Ctrl-to-descend binding was removed on request — `FreecamController` now flies up on Space only — and the six face spheres were doubled on request: draw diameter `GizmoSizePixels * 4` and hit radius `GizmoSizePixels * 8`, face spheres only, so the uniform centre dot stays the distinct small affordance.)*
+
+### Milestone 2.8 — Creation-environment Output window
+*The console surface lives with the terminal; the creation environment has none. Builder-side messages either land in Godot's console (`GD.Print` / `GD.PushWarning` — invisible to a creator in the client) or flash briefly and vanish: the command strip's Lua errors show for four seconds (`BuilderCommandLine.Submit` → `_statusText`), the §3.6 chain warning prints via `GD.PushWarning`, and a scripting suspension leaves only the red Viewport banner with no history. Unity's Console / Studio's Output is the model: one panel where build-mode diagnostics accumulate and stay readable.*
+- [x] New **Output** panel (`builder/OutputWindow.cs`, begun with `EditorChrome.PanelWindowFlags` like every other panel; opened from the existing **Add Window** menu beside Code Editor): one row per entry with a baked time label, a source tag and severity colour, drawn with the terminal console's row pattern — a baked entry list replayed each frame, allocation-free while drawing (the style-colour pop stays inside the child, the addon's documented stack hazard)
+- [x] Fed by a single sink — `builder/LotLog.cs`, verb-first `Info` / `Warn` / `Error` — so call sites report once instead of scattering prints. **The buffer is a bounded ring** (fixed entry cap 500, drop-oldest, explicit `Clear()`): a runaway script or a per-frame warning path must never grow it without limit. Godot console output continues alongside for headless runs, and the terminal's own console stays as-is — unifying the two surfaces is deliberately not part of this milestone
+- [x] Producers routed in the first cut: the command strip's Lua errors (the four-second flash can stay as the quick acknowledgement; Output keeps the full trace), the script-runtime diagnostics that already exist — load failures, dispatch errors, watchdog circuit-breaker suspensions, memory-guard rebuilds (§3.2, `LuaManager.LastError` / `SuspensionReason`) — save / load / autosave outcomes that today surface as one-shot modals only (§4.1/§4.2: the modal still appears, Output keeps the history), archive validation errors, and the existing warning paths (`NetRouter.Warning`, which its owner assigns to `GD.PushWarning`, plus the §3.6 chain-length `GD.PushWarning`, the Lua-api misuse warnings, the constraint picker and the decal/texture import failures). **Script output is captured after all (user-directed change):** the earlier plan deferred it to the scripting layer, but an Output that hides a script's own `log`/`print` is not an Output. `LotLuaApi.Log` — the one bound method both verbs flow through (§1.1 intact) — now fans into the sink under the `log` source tag, and **`print` is reinstated as a varargs alias of `log`** (tabs between arguments, exactly like standard Lua) in both VM surfaces: the entity sandbox (`LuaBootstrap`, whose native `print` is still stripped) and the scratch path (`LuaManager.BootstrapChunk`, defined after the strip so the ordering is safe). The old "denied globals" probes in `NetSelfTest` / `NetIntegrationTest` were re-pointed at the new contract: `print` must be a *function* there now, and everything genuinely dangerous (io/os/require/debug/coroutine/…) stays invisible
+- [x] Console affordances: severity filter toggles (Info / Warn / Error), Clear, the entry count in the title, and auto-scroll that pauses while the user has scrolled up (with a jump-to-latest action), so live output cannot scroll the failure being read away. Auto-follow is decided by the "was at bottom" sample taken *before* the frame's rows are drawn
+- [ ] Colours come from the §5.4 theme service once it lands (the terminal's severity roles are the starting palette); the panel is editor state, never lot state, so it survives Test-mode round trips, and it takes its tile from §5.6 when tiling is on
+**Acceptance criteria:** A creator opens Output from Add Window, runs a failing line in the command strip, sees the full Lua error stay in the list, watches a save / crash-recovery message arrive with its history intact, filters to errors only, clears, and still finds the window after a Test-mode round trip.
+**Difficulty:** 🟡 sink + window (the terminal's row pattern already exists) · 🟠 routing the existing producers without duplicating messages
+**Implementation status:** landed and verified headless. `builder/LotLog.cs` is the sink (ring of 500, baked time/source/text/severity, one severity-to-colour mapping in the window); `builder/OutputWindow.cs` is the panel (Add Window → Output, count in the title, three severity filters, Clear, jump-to-latest, follow-if-at-bottom); `Builder` owns its lifecycle exactly like the Code Editor's. Routing went to single funnels rather than per-call-site doubles wherever one existed: `LotLuaApi`'s warning helper (13 sites), the `ScriptRuntime` warn callback (every script-runtime diagnostic), `LuaNetBridge.Warn` (every router warning), `Builder.ShowLotMessage`/`ShowLotError` (every save/load/crash-recovery outcome), plus the constraint picker, chain warning, autosave, decal and inspector import failures. Engine-console output is untouched for headless runs.
+**Verification:** `LotLogSelfTest` (15 checks, 0 failures) — ring cap with drop-oldest order, `Clear`, per-entry severity/source/time fields, null tolerance, the sandbox `print` presence probe, and `print`/`log` driven through the real VM and read back out of the sink (`'smoke', 42, true` → `smoke\t42\ttrue`). The routing updated two existing pins to the new contract instead of leaving them stale: `NetSelfTest` 170 checks (was 169 — lost the `print == nil` assertion, gained the `print`-is-a-function one) and `NetIntegrationTest` 60 (was 59), both 0 failures alongside Gizmo 228, Wallpaper 55, LotProperty 39, CollisionGroup 48, Environment 39, LotArchive 235, Decal 100, EditorWorkflow 82 and Constraint 113 + gravity probe 10. The on-screen result (row colours, the time label column, filter toggles, scroll-pause behaviour, the window surviving a Test-mode round trip and being absent in Game mode) is a rendering outcome checked by eye in the running client, the project's usual split.
 
 ---
 
@@ -185,8 +236,8 @@ Legend for difficulty tags carried over from the original planning pass:
 - [x] The lot root is itself an entity: its script runs at lot load, so a new lot can spawn its capsule character and camera in Lua *(the load-time root-script path exists; the capsule/camera content itself lands with §3.4)*
 - [x] Graceful offline degradation — `net.*` resolves to direct local calls when a lot runs with no network (single-player, editor Test mode — see §3.4)
 - [x] Argument serialization rules defined (which Lua types cross the wire; error behaviour for unsupported types)
-- [x] Design doc before code: peer model (the host peer, not a hardcoded peer ID, given the §7.2 P2P hosting path), behaviour when a client calls an undefined `net.server` function, and whether one script may declare both `net.server` and `net.client`
-**Implementation status:** complete for the offline/loopback path (real P2P transport is §7, behind an `INetTransport` seam). Verified by `NetSelfTest` (169 fast checks on private Lua states, plus an opt-in 8-check heavy set via `OPENLOT_HEAVY_TESTS`) + `GizmoSelfTest` (171 checks). Index: see the **Implementation Index** section near the end of this file, and `docs/design/milestone-3.2-unified-script-model.md`.
+- [x] Design doc before code: peer model (the host peer, not a hardcoded peer ID, given the §8.2 P2P hosting path), behaviour when a client calls an undefined `net.server` function, and whether one script may declare both `net.server` and `net.client`
+**Implementation status:** complete for the offline/loopback path (real P2P transport is §8, behind an `INetTransport` seam). Verified by `NetSelfTest` (169 fast checks on private Lua states, plus an opt-in 8-check heavy set via `OPENLOT_HEAVY_TESTS`) + `GizmoSelfTest` (171 checks). Index: see the **Implementation Index** section near the end of this file, and `docs/design/milestone-3.2-unified-script-model.md`.
 **Acceptance criteria:** Two entities with separate scripts interact as plain function calls — a client invoking `net.server` performs a host-authoritative action, and the host invoking `net.client` triggers local client behaviour such as an animation or audio cue — with no creator code containing manual remote-event setup or client/server branching, and a new lot spawning its default character without manual scripting.
 **Difficulty:** 🔴 (one unified model is a single design problem — the routing design must be settled before implementation)
 
@@ -197,7 +248,7 @@ Legend for difficulty tags carried over from the original planning pass:
 **Difficulty:** 🟠 
 
 ### Milestone 3.4 — Test mode / Game mode + capsule character
-*Test mode and the capsule character are one milestone: Test mode is not meaningfully playable without a controllable character, and the character is a runtime concern rather than an art/asset one (it used to live in §5 as "capsule prototyping").*
+*Test mode and the capsule character are one milestone: Test mode is not meaningfully playable without a controllable character, and the character is a runtime concern rather than an art/asset one (it used to live in §6 as "capsule prototyping").*
 
 *Capsule work*
 - [x] Capsule character controller with basic movement and orbital camera (`CapsuleController` + `OrbitalCamera`: kinematic `CharacterBody3D` swept with `MoveAndSlide`, camera-relative WASD, gravity/jump, floor detection; the body excludes the part's own static collider, the same technique `PartDragController` uses)
@@ -213,39 +264,107 @@ Legend for difficulty tags carried over from the original planning pass:
 - [x] Camera ownership handoff: `FreecamController` hardcoded `Current = true` at build time and gated input on a layout-time `ViewportWindow` flag. Extracted `ICameraInputSource` (`CameraInputSource.cs`): the Viewport window resolves the per-frame conditions once and both cameras read from it, each acting only while Godot-`Current` and only for its own session
 - [x] `ViewportWindow.InputEnabled` is an instance property reassigned from modal state every layout pass (`Builder.DrawLayout`) — the Test-mode gate composes with that assignment via the pure `ViewportWindow.ResolveCameraAuthority(inputEnabled, focused, playerSession, ...)`: a modal denies both cameras, the session then decides which one gets the rest (verified by 4 integration checks)
 - [x] Script runtime lifecycle is start/stop-able: `BuilderScene.StartScriptRuntime()` / `StopScriptRuntime()` replaced the one-shot `_Ready`/`_ExitTree` block, so the runtime can be restarted mid-session (verified: stop clears it, start returns a running runtime that re-runs the lot's scripts). Reload-on-transition is the intended shape (see decision below); wiring this pair into the Test-mode menu entries is the remaining half
-- [ ] Player-originated `net.*` attribution wired up: `LuaNetBridge.SimulatePlayerInteraction` exists but only the self-tests call it. **Blocked — there is no input→script call path to scope yet**: lot UI elements have no click handling (`LotUIElement` is visual-only; interaction is §4.2), movement/look never cross into Lua, and the "button → door" self-test drives its handler directly rather than through player input. The first real consumer is lot-UI interaction, so this lands with it rather than behind fabricated plumbing
+- [ ] Player-originated `net.*` attribution wired up: `LuaNetBridge.SimulatePlayerInteraction` exists but only the self-tests call it. **Blocked — there is no input→script call path to scope yet**: lot UI elements have no click handling (`LotUIElement` is visual-only; interaction is §5.2), movement/look never cross into Lua, and the "button → door" self-test drives its handler directly rather than through player input. The first real consumer is lot-UI interaction, so this lands with it rather than behind fabricated plumbing (the §3.7 event path takes the `touched`-by-own-character half in the meantime — a physics contact, not UI input; what remains here is input-driven origination)
 - [x] Debug physics smoke test (`BuilderScene.RunPhysicsSmokeTest`) spawned bodies into the lot physics space — now skipped while a session is active. (The default character is also spawned clear of the test's origin-region probes: a ray straight down at x=0 asserts exact contact geometry, and a capsule parked at the origin broke 8 of its assertions)
 - [x] `PartDragController` runs in `Builder._PhysicsProcess` and never fights the character for a body: entering a session queues the drag's release, and the Viewport window skips pointer input entirely during a session, so no drag can start or survive
 
 *Decisions settled for this milestone*
-- **Entering Test mode reloads the lot** (script runtime restarts, `start()` re-runs, script-owned spawns re-spawn); exiting tears it down again and returns to the build-mode world. Chosen over an in-place transition because it is the honest runtime semantics, matches what the §3.2 design doc already describes, and avoids making the editor/runtime boundary re-entrant. Cost: unsaved Inspector edits do not survive a Test-mode round trip — acceptable while §8 save/load does not exist, since nothing else is durable yet
+- **Entering Test mode reloads the lot** (script runtime restarts, `start()` re-runs, script-owned spawns re-spawn); exiting tears it down again and returns to the build-mode world. Chosen over an in-place transition because it is the honest runtime semantics, matches what the §3.2 design doc already describes, and avoids making the editor/runtime boundary re-entrant. Cost: unsaved Inspector edits do not survive a Test-mode round trip — acceptable while §4 save/load does not exist, since nothing else is durable yet; §4.1 (Phase 1, hoisted to just below this milestone) removes the limitation once a lot is saved into a `.lot` archive
 - **State ownership:** script-owned spawns are destroyed on reload, so a capsule spawned by a lot-root script is re-spawned on re-entry rather than preserved across it
 - **`net.*` in Test mode** resolves through the existing `LoopbackTransport` — there is no peer, so calls stay local; only the origination scope changes
 
-**Implementation status:** landed and verified headless. `ICameraInputSource` + `OrbitalCamera` + `CapsuleController` are new; `Builder.EnterTestMode`/`ExitTestMode` and the Test/Game menu entries drive `BuilderScene.EnterTestMode(bool gameMode)`. Verified by `NetIntegrationTest.TestPlayerSessionCameraHandoff` (15 checks: the gate-composition truth table, the camera handoff both ways, character attach/detach, Test vs. Game) plus `TestLiveCapsuleSpawnPath` (6 checks) — 59 integration checks green alongside `GizmoSelfTest` 171 and `NetSelfTest` 169. One seam left open and marked blocked below (Player-originated `net.*`).
+**Implementation status:** landed and verified headless. `ICameraInputSource` + `OrbitalCamera` + `CapsuleController` are new; `Builder.EnterTestMode`/`ExitTestMode` and the Test/Game menu entries drive `BuilderScene.EnterTestMode(bool gameMode)`. Verified by `NetIntegrationTest.TestPlayerSessionCameraHandoff` (15 checks: the gate-composition truth table, the camera handoff both ways, character attach/detach, Test vs. Game) plus `TestLiveCapsuleSpawnPath` (6 checks) — 59 integration checks green alongside `GizmoSelfTest` 176 and `NetSelfTest` 169. One seam left open and marked blocked below (Player-originated `net.*`). **Test mode is now fully an instance of the lot** (completed with §3.6): entering snapshots the authored world and leaving restores it (`builder/LotSessionSnapshot.cs`), so physics results, script edits and session-spawned nodes cannot mutate the build lot or a later save — only an authored entity a session script *destroyed* is not resurrected. **The character pushes loose parts** (interaction with the §3.6 dynamic layer): a `CharacterBody3D` transfers nothing into a `RigidBody3D` by itself, so without an explicit contact impulse a part the player walks into just freezes against the character. `CapsuleController.PushCollidedBodies` reads each slide collision's rigid body, **wakes it** (a sleeping body swallows impulses) and applies the mass-scaled impulse that closes the speed gap along the contact normal — at the contact point, so a hinged part swings instead of sliding rigidly. The push reads the **commanded** velocity captured before `MoveAndSlide`, because the move rewrites `Velocity` into its post-slide (blocked) value exactly when a push is due; `TryComputePush` is pure so the self-test pins the arithmetic.
 **Acceptance criteria:** A creator can hit Test mode from the builder and immediately play their lot — a brand-new empty lot spawns a controllable capsule character with a working camera and running scripts, with no manual scripting — then return to editing; Game mode plays the same lot with no editor tooling present.
 **Difficulty:** 🔴 (two coupled halves plus a new runtime/editor boundary — the mode switch, the character, and the script lifecycle have to land together or not at all)
 
+---
+
+> ### ⬆ HOISTED: §4 (`.lot` Archive & `LotVFS`) — Phase 1, moved up to sit right after §3.4
+>
+> §4 is the **immediate top priority** (Roadmap Execution Stages → Phase 1), and it sits here — ahead of
+> §3.5–§3.12 — for **execution** order, not reading order, because everything durable serializes through it:
+> §2.5's environment settings, §2.4's autosave, §5.3's lot-UI tree, §3.7's scripts, §6.2's meshes and §7.2's
+> audio all read/write the `.lot` archive. The sections that follow keep their relative order (§5 Terminal, §6
+> Characters, §7 Animation, §8 Networking), so this block is the only one out of numeric sequence. §3 resumes
+> at §3.5 just below.
+
+## 4. Save/load & lot persistence — The `.lot` Archive *(Phase 1 — see Roadmap Execution Stages)*
+
+### Milestone 4.1 — `.lot` archive format, `LotVFS` & versioning
+**Implementation status:** the write half is complete; the read-into-the-scene half is §4.2. Landed: `builder/LotArchive.cs` owns the format (manifest / node-record / property-bag / environment records, their JSON encoding via Godot's `Json`, and the version gate); `builder/LotArchiveIo.cs` is the single zip writer plus the manifest+payload reader; `builder/LotVfs.cs` is the streaming read path (`Open` / `HasEntry` / `ReadEntry` / `ReadEntryText` — the roadmap's `OpenLot` / `TryReadAsset` naming was not used, the narrower verbs are the contract); `builder/LotSceneWalk.cs` captures the live `LotRoot`/`LotUIRoot` into a `LotDocument`; `builder/LotArchiveCollect.cs` gathers script text and texture bytes into the archive's `scripts/` + `assets/` (+ their `Secret_Code/` + `Secret_Asset/` counterparts); `builder/LotSave.cs` is the one pipeline manual save and autosave both call; `builder/LotAutosave.cs` is the periodic snapshot, the crash marker and the recovery prompt; `builder/SecretContent.cs` is the editor-side hide/reveal gate. Verified headless by `LotArchiveSelfTest` (**175 checks, 0 failures**): the version gate both ways; the manifest / node-record / environment JSON round-trip through the real encoder; the VFS read path; a captured scene surviving the round-trip; script + asset routing (base content to the secret folders, creator content to the normal ones); the full save pipeline from live nodes to a re-readable archive; autosave's guard rails plus the marker contract; the secret-content gate (default hidden, only base content affected, reveal/hide, and the caution's wording); and the section's own collection walk (`HierarchyPanel.CollectSecretRoots`), which is what proves a revealed section finds the base script instead of drawing an empty heading. The secret rows' on-screen layout is a rendering outcome checked by eye, the same split the project uses for the wallpaper.
+Three Godot facts the round-trip pinned down, because each is easy to get wrong: `Json.Stringify` writes a `Vector3`/`Color` as the **string** `"(1, 2, 3)"` — not an object, and *not* the Variant text form `GD.StrToVar` accepts, so `ReadVector3` / `ReadColor` parse that tuple themselves; and `ZipReader.GetFiles()` lists **directory entries** (`scripts/`) as well as files, so `LotVfs.Entries` filters names ending in `/` and means "entries you can actually read".
+**Still open in this milestone:** (a) restoring a `LotDocument` **into** the live scene — deliberately deferred to §4.2, so nothing here half-loads; (b) no migration exists because v1 is the first version. `LotSave.Write` and the collection pass are proven; wiring them to the File menu is §4.2.
+- [x] Define the `.lot` as a **single-file Zip archive bundle** — one portable lot document, not a loose folder tree. Fixed entries:
+  - `manifest.json` — **format version**, lot metadata (name, author, created/modified), **`maxPlayers`**, and the **entry script** a headless host boots (§8.1), so the archive declares its own server entry point instead of a hardcoded path.
+  - `lot.json` — the scene payload: scene hierarchy, per-object transforms, `LotUIRoot` elements (§5.3), **environment settings** (`LotEnvironmentSettings`, unblocks §2.5), and the `LotPropertyRegistry` **bindings** (the 2.3 table is the declaration; this is the stored value set per object).
+  - `scripts/` — the local entity + root Lua scripts: the `.lot`-local home for what is `user://Scripts/*.lua` today (`ScriptManager.ScriptsDir`, `BuilderScene.EnsureDefaultLotScript`). Script nodes reference entries here by archive-relative path, so a lot is self-contained and portable.
+  - `assets/` — embedded binaries: 3D models (`.glb`), textures and audio. These are the bytes §6.2 (GLTF), the 2.3 Texture property and §7.2 (audio) load at runtime, instead of files that exist only on the author's machine.
+  - **`Secret_Code/` + `Secret_Asset/`** — the base-content counterparts of the two folders above, holding what a creator does not normally edit (base character code, base character formats, and later other base material). They are the **same format** as the normal folders — same writer, same reader, same VFS path — and the only difference is derived from the path prefix (`LotArchive.IsSecretPath`), so no per-entry flag was added to the v1 record. Routing rule, stated once in `LotArchiveCollect`: the script a new lot ships with (`BuilderScene.DefaultLotScriptName`) goes to `Secret_Code/`, a texture on a Capsule (the base character) goes to `Secret_Asset/`, everything else to the normal folders.
+  - **Base content is separated in the editor, not just marked** (follow-up fix). The first cut filtered the base script row in place, which left it listed *inline among the creator's own nodes* — the one arrangement where a shared, proprietary file gets edited by muscle memory. Now: `builder/SecretContent.cs` owns the visibility decision and nothing else, `HierarchyPanel.DrawNode` **always** excludes base content from the main tree (not only while hidden), and `DrawSecretSection` draws it below the normal tree under its own heading — an amber `Secret Content (proprietary)` title, a caution line, a separator, and a `[base]` marker on each row. The section is drawn before the marquee so its rows still take part in marquee hit-testing, and it renders through the same row code, so selecting, renaming, dragging and the context menu behave identically once revealed. Selection is a **second** exposure, so `InspectorPanel.DrawHeader` prints the same heading + caution before any control when the selected node is base content.
+  - **`IsSecretContent(node)` is the section-membership test and never changes with the reveal state** — `Revealed` only decides whether the section is drawn at all. A classification that flipped with the toggle is precisely how base content would end up inline again, so a self-test pins it across both states.
+  - Hiding again needs no confirmation; revealing is **View → "Show Secret Content…"**, which opens a caution modal first ("universal and proprietary to OpenLot … ONLY proceed if you know what you are doing"). Visibility only: a hidden node stays in the scene, still runs and still saves — and the state is session-only, so a restart is hidden again. **`Secret_Asset/` content is not surfaced anywhere yet** because the editor has no archive browser to list it in; that lands with §14.6.
+  - Known cosmetic quirk: a drag dropped near the secret section draws its insertion line inside that section, but the landing is resolved against the node's *real* parent (`LotRoot`) because the section is a view, not a container — so a drop can never move something *into* secret content. Not fixed, deliberately: fixing it means teaching the drop feedback about the section for no behavioural gain.
+- [x] Introduce **`LotVFS`** — a Virtual File System that **streams assets directly out of an open `.lot` archive without extracting them to disk**. Primitives: Godot's `ZipReader` (`Open` → `FileExists` / `GetFiles` / `ReadFile`) to read and `ZipPacker` to write; the archive index is read once and entry bytes are handed straight to Godot's **buffer** loaders — `Image` `Load*FromBuffer` for textures (the path 2.3's `LotTextureCache` already uses), `GltfDocument.AppendFromBuffer` + `GltfState` for models (§6.2), and the matching buffer path for audio (§7.2). `LotVFS` is the **single read path** for every asset consumer, so there is one loader and one disposal rule. Tier note: this is **Godot-infrastructure-facing** code — it owns file/zip/buffer access and exposes only narrow, verb-first accessors (`OpenLot`, `ReadEntry`, `TryReadAsset`) upward; Lua never touches it directly (§1.1).
+- [x] Versioning + migration: a `formatVersion` in `manifest.json`; an older file is either migrated or rejected with a clear, readable error — never a silent half-load. Document the migration step for every bump.
+- [x] **Autosave and crash recovery** (moved here from §2.4 — there was nothing to serialize until this format existed): a periodic autosave to **`user://autosave.lot`**, a crash marker written on unclean exit, and a recovery prompt on boot that offers the recovery file over the last manual save. Autosave rides the same writer as a manual save (§4.2), so it can never emit a file the loader rejects. **The prompt now actually loads the snapshot** (it used to only keep the file and point at the File menu, which was true while §4.2 was unbuilt): `Recover` runs the same `LotLoad` path Open Lot… does, but **does not adopt the snapshot's path as the lot's file** — a recovered lot has no destination the creator chose, so it is marked dirty (quitting warns, `Ctrl+S` asks for a file) and the snapshot is deleted **only after a save that actually succeeded** (`Builder.WriteLot`), so a failed or cancelled save can never destroy the only copy. The load is deferred to the top of the next layout pass rather than run where the modal is drawn, because the modal renders *after* the panels have walked the scene and replacing the lot there would free nodes they had just read.
+**Window close is routed through the unsaved-changes prompt (follow-up fix).** Clicking the OS window's X used to let Godot quit immediately, which bypassed the unsaved-changes prompt *and* — because the scene tree is still torn down — ran `_ExitTree`, cleared the crash marker and so made an abandoned session look "clean", suppressing the recovery prompt as well. `Builder` now sets `GetTree().AutoAcceptQuit = false` in `_Ready`, handles `NOTIFICATION_WM_CLOSE_REQUEST` (ignored while the unsaved-changes prompt is already up, so a second X click cannot discard the work being asked about), and hands `AutoAcceptQuit` back in `_ExitTree` so the terminal keeps Godot's default. X therefore means "close OpenLot" (`RequestQuit(true)` → `QuitApplication`), not "go back to the main menu", which is what the menu's Exit does. Two related data-loss bugs in the same path were fixed with it: the prompt's **"Save & Quit" only cleared the dirty flag and never wrote a file** (a 2.3-era stub) — it now saves through the real pipeline, parking the quit intent in `_quitAfterSave` so a save that still needs a destination from the file dialog can finish first, and a **failed** save cancels the quit rather than ending the session on top of it; and the pause menu's "Save Lot" button, which still printed "persistence lands with milestone 2.3", now calls the real save.
+**Acceptance criteria:** The `.lot` format is documented and versioned, a file written by an older build is either migrated or rejected with a clear error rather than failing silently, a lot is recoverable after a crash or restart without losing work, and an asset loads from inside the archive with no extracted copy left on disk.
+**Difficulty:** 🟠 zip bundle + manifest split · 🟠 `LotVFS` buffer streaming · 🟠 versioning/migration · 🟠 autosave/crash recovery
+
+### Milestone 4.2 — Save/load
+**Implementation status:** landed and verified headless. `builder/LotSceneLoad.cs` is the mirror of `LotSave` — it restores a decoded archive into a lot's two containers in four ordered phases (nodes → lot UI → asset bytes → properties), and the ordering is load-bearing because a part's Texture property only accepts an id the cache already knows. `builder/LotLoad.cs` is the single load pipeline and is **two-phase**: it decodes and validates the whole archive *before* touching the scene, so a newer-than-this-build file, a missing payload or a corrupt zip is reported and the creator's current work is left exactly as it was. `BuilderScene.ReplaceLotFromArchive` owns the scene-level consequences (stop the runtime → drop selection and history → empty both containers → restore → apply environment → reset and re-issue handles → restart the runtime), and `BuilderScene.EmptyContainer` frees immediately rather than queueing, because a queued free would leave the old nodes in the tree for the rest of the frame and the new ones would be added alongside them. `builder/LotFilePicker.cs` is the `.lot` browser (Save As / Open), reused for both actions and justified the same way as `ImageFilePicker`. The File menu's Save Lot / Save Lot As… / Open Lot… are live (`Ctrl+S` too), disabled inside a player session, and report their outcome — including anything that could not be embedded — in a message modal. `LotAutosave` now writes through `LotSave.WriteScene`, the same scene-level pipeline a manual save uses.
+Two additions this milestone needed, both stated as such rather than slipped in: (a) **`LotTextureCache.ImportFromBuffer`** registers archived bytes under the id the record already references. Without it a loaded texture would dangle, because `MakeAssetId` hashes the *source path* — which does not exist on another machine — so a save→load→save round-trip only stays stable if the id is preserved. Its decode step is the same sniff-and-dispatch path `ImportFromFile` uses (`DecodeBytes`), so there is still one image loader. (b) **Scripts are now recorded** in `lot.json` as a `"script"` record kind carrying only the file *name*. Inferring them from the archive's `scripts/` + `Secret_Code/` entries would have flattened every script onto the lot root, and the context menu's "Insert Script" attaches a script to any entity — so a root-only restore would silently change what the lot does. This is an additive change to v1 (a new record kind, no changed field) made before any lot shipped, so no migration is needed; the file name is stored rather than a path because a machine-local path must never enter a lot.
+Verified by `LotArchiveSelfTest` (**225 checks, 0 failures**), including the full acceptance path: a live lot with two parts, an attached texture, a root script *and* a script attached to a part, plus a UI element, is saved, every reference released, and loaded into fresh containers — asserting structure (the attached script is still under its part), transforms, properties, UI rect/visibility, the recovered image (same id, really decoded from the archive, same pixels), and the manifest's name and creation stamp. Also covered: the kind-tag round trip both directions, `ImportFromBuffer` (including a repeat import reusing the entry, and a non-image being refused), and the unknown-kind path.
+**Known gaps, stated rather than implied:** `LotSceneLoad.Restore` is what the tests drive; the thin scene-level glue in `BuilderScene.ReplaceLotFromArchive` (selection/history drop, container emptying, handle reset, runtime restart) is not covered headlessly, because it replaces the one live lot the other suites depend on — it is compile-verified and checked by eye in the client, like the menu/dialog flow. Cross-device transfer is a plain file copy and was not exercised on a second machine here. Writing a loaded lot's scripts back to `user://Scripts/` means **the archive wins** over a stale local copy of the same file name (deliberate — a lot ships its own code).
+- [x] Save a creation as a single `.lot` file (the writer §4.1-autosave also uses).
+- [x] Load a saved creation, same device — read through `LotVFS`, restoring scene, `LotUIRoot`, environment and assets in one pass.
+- [ ] Transfer and load a saved creation on a different device (may be held for later) — the archive is self-contained, so this is a file copy rather than a folder-tree move.
+**Acceptance criteria:** A lot built on one machine can be saved, copied to a second machine, and loaded there with all objects, UI elements, scripts and embedded assets intact.
+**Difficulty:** 🟠
+
+**What this section unblocks / re-indexes**
+- §2.5 environment persistence — serialized into `lot.json` (unblocked by §4.1).
+- §2.4 autosave + crash recovery — now defined here, on the §4.1 writer.
+- §5.3 lot UI elements and §3.7 event/timer scripts — persisted via `lot.json` / `scripts/`.
+- §6.2 runtime GLTF + texture loading — reads embedded `assets/*.glb` + textures through `LotVFS`.
+- §3.12 per-player data slot and §14.7 snapshots — reserved in the same archive/versioning story rather than bolted on later.
+
+---
+
+> **§3 resumes here** at §3.5 — the §4 block above sits ahead of it for execution order (Phase 1), not reading order.
+
 ### Milestone 3.5 — Collision groups and layers
-- [ ] Per-object collision layer/mask editing (currently hardcoded `CollisionLayer = 1` / `CollisionMask = 0` on every part) with named groups
-- [ ] Which interactions collide is creator-controlled; the host stays authoritative for anything with enforcement impact (§1.3)
+**Implementation status:** landed and verified headless. `builder/LotCollisionGroups.cs` is the one table: the eight creator-assignable groups (index i owns layer bit `1<<i`, with `Default` at index 0 so an existing part keeps today's layer), a symmetric interaction matrix, and the mask derivation (`MaskForName`). `LotObject` gained `CollisionGroup` + `SetCollisionGroup`/`RefreshCollision`; its body now wears the group's bit as layer and the group's row of the matrix as mask (`SetCanCollide(false)` still parks it on the reserved `NoCollideLayer`, which wins over the group). The three hardcoded masks were replaced: the player body (`CapsuleController`) masks the `Character` row, the drag mover and the drag-plane query (`PartDragController`) use `AllBits`, and `EditorPickMask` spans every group plus the no-collide layer so a non-default or non-collidable part stays selectable/draggable. The matrix is edited under **View → Collision Groups** (`builder/CollisionGroupControls.cs`, same inline-menu pattern as the environment) and written from Lua; `BuilderScene.RefreshCollision()` is the single O(parts) re-sync, run only on an explicit change. It persists as a `collision` block in `lot.json` (`LotArchive.LotDocument.Collision`, set by `LotSave.Write`, re-applied by `ReplaceLotFromArchive`), so a loaded lot keeps its groups and a lot without the block resets to all-collide.
+- [x] Per-object collision layer/mask editing (was hardcoded `CollisionLayer = 1` / `CollisionMask = 0` on every part) with named groups
+- [x] Which interactions collide is creator-controlled; the matrix write is documented host-authoritative for anything with enforcement impact (§1.3)
 **Acceptance criteria:** A creator puts objects into named collision groups and only the intended objects interact.
+**Verification:** `CollisionGroupSelfTest` (48 checks, 0 failures) + `LotPropertySelfTest` 39, `LotArchiveSelfTest` 233, `EnvironmentSelfTest` 39, `GizmoSelfTest` 176, `NetSelfTest` 169, `NetIntegrationTest` 59, `EditorWorkflowSelfTest` 82 — all 0 failures, headless under `#if DEBUG` from `BuilderScene._Ready`. The matrix grid's on-screen layout is a rendering outcome checked by eye in the running client.
 **Difficulty:** 🟠
 
 ### Milestone 3.6 — Constraints and joints
-- [ ] Hinge and weld constraints between parts, requiring dynamic bodies (parts are static-only today)
-- [ ] Decide how constraints interact with Anchored / CanCollide from §2.3
+- [x] Hinge and weld constraints between parts, requiring dynamic bodies (parts were static-only)
+- [x] Decide how constraints interact with Anchored / CanCollide from §2.3
 **Acceptance criteria:** A creator hinges or welds two parts and they hold or pivot correctly in play.
-**Difficulty:** 🔴 (needs a dynamic-body layer first — pairs with the Anchored/CanCollide semantics decision in §2.3)
+**Implementation status:** landed and verified headless, on the lightweight design agreed for this milestone. Two link kinds only — beyond the §2.3 Texture/Anchored set those are the vocabulary: `builder/LotConstraint.cs` owns the model (a weld or hinge record between two part handles, a hinge's pivot stored part-local, its world-second-side form, the id table and the `constraints` block of `lot.json`), the **Roblox anchor rule** (one anchored part freezes its welded island; the weld that would join two anchored islands goes inactive — deterministic in creation order, so it is replayable) and the JSON shape. `builder/LotConstraintSession.cs` is the dynamic-body layer and joint builder: unanchored parts swap `StaticBody3D` → `RigidBody3D` on session entry (via `LotObject.SetSimulated`, mass from the mesh's volume) and back on exit, and each active record becomes a Godot joint — welds a `Generic6DofJoint3D` with all six axes locked (enabled limit, lower == upper == 0 — Godot has no locked switch), hinges a `HingeJoint3D` whose frame aims its local Z at the chosen world axis, both added as **siblings of the parts they constrain** (a joint parented to a body it links is how half-frozen axes happen). **A simulated body lives at the lot root, not under its part** (`SetSimulated(simulated, host)`), and `SyncVisuals` puppets the part from the body once per physics step — physics owns the body, the part follows it, exactly the capsule controller's visual/body split. The first cut nested the body under the part and never synced, so bodies fell invisibly while the mesh stood still ("unanchored objects are not affected by gravity" reported from the client); the entity-destroy walk now also releases a simulated body explicitly (`ReleaseSimulatedBody`), since it no longer dies with its part. Anchored parts deliberately keep their static body — infinite mass by definition, so the solver never sees them — and the player capsule is excluded outright, since its controller owns it. **The session build hangs off `EnterTestMode`, not off `StartScriptRuntime`** — the script runtime early-returns when Lua is unavailable, and the body swap and joints are physics, so they must exist even with a dead scripting layer. Joints are session artifacts, marked `InternalChildMeta`, rebuilt idempotently whenever a script reload mid-session changes the tree and freed by the entity-destroy walk the moment a linked part dies (a joint to a freed body is a crash). The editor is the same data: Toolbox **Weld**/**Hinge** buttons run a picker (`builder/ConstraintPicker.cs`). Weld is two clicks (part, part). Hinge is: click the first part, click the second part or empty space for the world, then a **placement step** — a visible hinge-point marker (ball + axis rod, internal-marked) appears at the first click's point, further clicks move it (on a surface, or along the camera-facing plane on empty space), and the Toolbox's **Confirm**/**Cancel** buttons finish or abandon it; nothing is created until Confirm. A fresh hinge gets the **swing-friendly default axis** — horizontal, perpendicular to the line between the parts (`ConstraintPicker.DefaultHingeAxis`), because the vertical axis' zero-torque equilibrium reads as "the hinge does nothing" — and the axis rod shows it before Confirm. **The axis is a free world-space direction with sharp tools** (`builder/HingeAxisMath.cs`: exact **Vertical**/**Horizontal** presets and 45° **Tilt**/**Yaw** steps), offered both during placement (Toolbox) and afterwards (Inspector, one history entry per press), and **a hinge marker is drawn for the selected part's hinges in build mode too** (`builder/HingeVisualizer.cs`, pooled internal-marked markers via the shared `ConstraintVisuals`) — which is what makes an orientation, and a change to it, visible without entering Test mode. The axis persists as a v1 letter when it is axis-aligned ("x", "-y", ...) and as a vector otherwise, so old lots and angled hinges both read. Each gesture is one undo entry. The Inspector grows a Constraints section (`builder/ConstraintControls.cs`) with per-link enable/remove and hinge axis/limits/motor widgets, live-applied to the running joint, and welds/hinges are **listed in the Hierarchy** under a `Links (n)` section (`HierarchyPanel.DrawLinksSection`): one row per record, click selects the first part (whose Inspector edits the link), right-click offers Select parts / Toggle / Remove — drawn as a view over the one record table (the same pattern as the base-content section), not as duplicated placeholder nodes that could drift. **Test mode is an instance of the lot** (the §3.4 semantics completed): entering snapshots the authored world (`builder/LotSessionSnapshot.cs` — transforms, colors, visibility and every declared property per entity, UI rects/labels, held texture ids, the constraint and collision-group tables, and the entity set) and leaving restores it after the exit reload, so physics results, script edits and session-spawned nodes cannot leak into the build lot or a later save. Not restored, deliberately: an authored entity a session script *destroyed* (Test mode restores state, not deletions), the camera and the selection. Scripts get eight verbs on the existing bound surface: `WeldParts`, `Unweld`, `IsWelded`, `CreateHinge`, `SetHingeLimits`, `SetHingeMotor`, `SetHingeAxis` (aim the axis at any direction; the string form on `CreateHinge` only spells the six axis directions), `RemoveConstraint`. Reserved and rejected with a readable message rather than half-supported: the servo/angle motor mode (waits on §3.8's tick drive), restitution and break thresholds (waits on §3.7's events). **Long chains warn instead of capping** (the agreed decision): a session counts the active links per welded island and warns above eight (`LotConstraints.ChainWarnThreshold`) — springiness grows with chain length, and the fix (anchor a root, split the build) stays the creator's call. The hinge editor also gave the property system its `Float` kind (decision D3), which §3.11's mass/friction will reuse. **Manual call-out:** `LotObject.CollisionBody` is now typed `PhysicsBody3D` (base of both bodies) instead of `StaticBody3D` — every existing reader compiles unchanged, but anyone who typed it `StaticBody3D` in their own code must widen it too.
+**Verification:** `ConstraintSelfTest` (113 checks, 0 failures) covers the hinge basis convention (right-handedness and the Z-aim — for the world axes and an angled one), the sharp axis tools (Vertical/Horizontal presets, 45° Tilt/Yaw steps, zero-axis refusal), the player-push arithmetic (mass-scaled and capped, no push when standing, backing off or already keeping up), the registry and pair-order tolerance, the anchor rule's full truth table, the chain gauge (islands, splits, hinge counting, the warn-not-cap threshold), the `constraints` block through the real JSON encoder/parser incl. the Vector3-as-string pitfall, both axis storage forms (a v1 letter and an angled vector), and clean skips for unknown kind/stale index/bad axis, the body swap and joint build/teardown against a live world (three active links of four records, the split weld absent, node paths resolving to the swapped bodies, live hinge edits), a full save→read→restore→resolve round trip to disk, the Float kind end-to-end (walk capture, JSON, service history, unregistered again afterwards) and the eight Lua verbs through the real VM. A **staged session probe** adds 10 more checks across real frames: it drives the actual `EnterTestMode` entry with a scenario in the lot (a free-falling part, an anchored/unanchored hinge pair, a weld frozen by its anchored side, a weld between two free parts, a floor and a loose part in the character's path) and asserts the full behavior — the free part's visual falls, the hinge's anchored side does not move while its free side swings under gravity and holds its pivot distance, the anchored weld freezes its island, the free weld falls as one with its gap intact, **the character walks forward (driven by a synthetic physical W key — `Input.ParseInputEvent`, the same state the controller reads) and pushes the loose part ahead of it**, and **leaving Test mode restores the authored transform**. It runs headless-only (it would hijack an interactive debug session) and needs `--quit-after 500` so the ~1.4 s of wall-clock runtime after the suite actually happens. The synchronous suite cannot see this class of bug (no physics steps between the swap and the teardown), which is exactly how the first cut shipped bodies that fell invisibly; the probe is the regression for it. Runs headless from `BuilderScene._Process` after the `_Ready` suites (it registers that scratch Float descriptor, so it must not shift their property counts); the on-screen feel of the picker gesture, the hinge-point marker, the build-mode hinge markers and a swinging door are rendering outcomes checked by eye in the running client.
+**Difficulty:** 🟠 (was 🔴 until the design settled; the remaining unknowns were the weld representation — Godot has no weld joint — and the Anchored interaction, both settled above)
 
 ### Milestone 3.7 — Event/signal system
-- [ ] Script-subscribed events: `touched`, `clicked`, plus per-frame and timer callbacks — scripts today have only load + `start()`, with `Tick()` never reaching Lua
-- [ ] Event registration through the bound API (narrow subscribe/unsubscribe methods per §1.1, never raw Godot signal connections leaking into Lua)
+- [ ] Script-subscribed events: `touched` / `touchEnded`, `clicked`, plus per-frame and timer callbacks — scripts today have only load + `start()`, with `Tick()` never reaching Lua
+- [ ] The creator-facing vocabulary is settled once, here (these names are API from this point on): `touched(other, player)` / `touchEnded(other)`, `clicked(player)`, `entered` / `exited` (reserved — §3.13's query volumes raise them through THIS registry, riding the existing event path "instead of a second subscription mechanism"), `destroyed`, `playerJoined` / `playerLeft` (§8.1), and `onFrame(delta)` — the per-frame callback declared like `start()` (a top-level function, zero registration cost, and the first thing a Roblox-native creator reaches for). Stepped-vs-Heartbeat is deliberately collapsed to ONE render-frame point; §3.8's timers fire through this same spine (one scheduler, not two)
+- [ ] Event registration through the bound API (narrow subscribe/unsubscribe methods per §1.1, never raw Godot signal connections leaking into Lua), stored the way `net.*` already stores handlers: a Lua-side registry keyed by (subject, event) with the callback never retained as a C# wrapper, one bound bookkeeping method behind declaration sugar (the `makeNamespace` pattern, `NetRegister`-shaped) and one stack-based dispatch entry (`__openlot_dispatchEvent`, mirroring `__openlot_dispatch`). Subscribing targets any handle, so one manager script can watch many parts
+- [ ] `touched` is **overlap-based, not collision-based**: subscribing opts a part into a sensor, so a `CanCollide = false` trigger plate works by design (that case is the whole point) and a static part works as well as a rigid one; §3.5's matrix governs physics and cannot silently swallow events. `touched`/`touchEnded` are edge-triggered pairs (a resting contact does not re-fire), `other` is the other entity's handle, and `InternalChildMeta` nodes (collision hulls, decal quads, joints) are filtered out so no creator ever receives an implementation handle
+- [ ] Deliveries queue during the frame and dispatch only from `ScriptRuntime.Tick` — the shape `NetRouter.Flush()` already has: Lua never runs inside a physics callback, every delivery is ONE watchdog unit so one misbehaving handler trips alone, and the frame budget spans events, net and timers uniformly. The existing 3-trips circuit breaker covers events exactly as it covers `net.*` — one breaker, not two
+- [ ] Handler storms are bounded by construction: duplicate (subject, event, other) deliveries within one frame coalesce, a per-frame delivery cap drops overflow with ONE throttled `LotLog` line (the aggregate-and-throttle pattern `NetRouter.UnknownHandlerStat` already uses), and event arguments are primitives built on the stack — handles and the player id, no tables, no serializer, so a hot contact path allocates nothing per delivery
 - [ ] Handlers run under the existing watchdog/memory budgets; one misbehaving handler must not stall the frame (frame-budget accounting in `ScriptRuntime.Tick`)
-- [ ] `touched`/`clicked` carry the originating player through the §3.4 attribution path (`BeginPlayerInteraction`), so this lands together with the in-lot command UI (4.2) and lot UI activation (4.3) — one shared in-session input blocker
-- [ ] `playerJoined`/`playerLeft` wait on §7.1 (no peers exist on `LoopbackTransport`); the chat UI work in 7.3 can use them once they land
-**Acceptance criteria:** A part's script reacts to touch and click, a timer callback fires on schedule without tripping the watchdog, and a player-triggered handler executes with player attribution.
-**Difficulty:** 🟠 event registration + budgets · 🔴 player attribution (blocked with 3.4/4.2/4.3) · `playerJoined`/`playerLeft` blocked on 7.1
+- [ ] Attribution flows through deliveries via the §3.4 path (`BeginPlayerInteraction`): a delivery enters the same dispatch context `net.*` uses, so inside a `touched` handler `net.fromPlayer` is true when the toucher was the local player's own character and false for a physics-caused touch, and the handler's own `net.server` calls inherit it (rule D6). **This half lands with this milestone** — the touch path is physics (`FindCharacter` names the player), not UI input, so it is not the fabricated plumbing §3.4 refuses; what waits is `clicked` and remote-player attribution
+- [ ] `clicked` carries the originating player through the in-session input path, so it lands together with the in-lot command UI (5.2) and lot UI activation (5.3) — one shared in-session input blocker
+- [ ] `playerJoined`/`playerLeft` wait on §8.1 (no peers exist on `LoopbackTransport`); the chat UI work in 8.3 can use them once they land
+- [ ] Subscription lifetime is leak-proof by construction: destroying the subscriber removes its handlers from every subject it subscribed to, and destroying the subject removes what it carries — both through the one `DestroyEntity` → `ForgetEntity` walk; a reload (VM rebuild, Test-mode entry/exit) drops everything through `ClearRegistries`; every subscribe returns a cancel token; a destroyed entity's handler can never fire afterwards. This closes the memory-review checklist item about subscriptions that outlive their object
+- [ ] Subscriptions ship inside the lot: event/timer declarations are ordinary Lua in the archive's `scripts/` (§4.1) and load through the same `ScriptRuntime` path — no out-of-band registration file a saved lot could lose. Nothing new enters `lot.json`; a loaded lot re-establishes subscriptions exactly the way it re-declares `net.*`
+- [ ] Docs before code, at §3.2's bar: `docs/design/milestone-3.7-event-system.md` settles the registration sugar (ONE public mechanism; token cancel; redeclaration replaces within a script, appends across scripts), touch semantics, two-ended cleanup, delivery order (handle-ascending, then declaration order — deterministic for tests), the coalesce/cap numbers, and the attribution matrix; the creator-facing half lands in `docs/net-api.md` or its own file
+**Acceptance criteria:** A part's script reacts to touch and touchEnded with the other entity's handle, a destroyed entity's handlers stop firing with nothing left in either registry, a player-caused touch handler sees `net.fromPlayer` true in Test mode while a physics-caused one sees false, an `onFrame` callback runs every frame and stops at session exit, a one-frame touch storm is coalesced/capped into bounded work with one throttled log line, a timer callback fires on schedule without tripping the watchdog, and a player-triggered `clicked` handler executes with player attribution (the clicked half lands in Phase 2 with 5.2/5.3).
+**Difficulty:** 🟠 registration + the delivery spine · 🟠 touch sensing + bounds · 🟠 lifecycle (tokens, two-ended cleanup) · ⛔️ `clicked` + remote-player attribution (waits on §5.2/§5.3 · §8.1) · ⛔️ `playerJoined`/`playerLeft` (waits on §8.1)
 
 ### Milestone 3.8 — Tween/timing library
 - [ ] Smooth property changes from Lua (position, rotation, color, UI rects) without per-frame loops in scripts
@@ -256,7 +375,7 @@ Legend for difficulty tags carried over from the original planning pass:
 
 ### Milestone 3.9 — Input API
 - [ ] Key/mouse/gamepad state readable from scripts, polled once per frame and cached (not one Lua↔C# call per key — the boundary-crossing cost the perf rules flag)
-- [ ] Composes with §4.5 keybinding customization and §12.1 gamepad support: scripts see logical actions, never hardcoded physical keys (today `CapsuleController`/`FreecamController` hardcode WASD)
+- [ ] Composes with §5.5 keybinding customization and §14.1 gamepad support: scripts see logical actions, never hardcoded physical keys (today `CapsuleController`/`FreecamController` hardcode WASD)
 - [ ] Authority rule documented: raw input is client-local; anything with enforcement impact goes through host-authoritative `net.server` (§1.3) — decided here, not later
 **Acceptance criteria:** A script reads jump/interact actions each frame via logical names, works with rebound keys and a gamepad, and a hostile client cannot move another player's character.
 **Difficulty:** 🟠 (+ 🔴 if input ever drives enforcement — see §1.3)
@@ -270,67 +389,96 @@ Legend for difficulty tags carried over from the original planning pass:
 
 ### Milestone 3.11 — Physics API
 - [ ] Raycasts from Lua (the query path already exists internally in `PartDragController` — this is exposure, not new physics)
-- [ ] Forces/velocity on parts — **depends on the dynamic-body layer from §3.6** (parts are static-only today); one dependency, shared with constraints/joints
-- [ ] Material properties per part (friction, bounciness, mass) once bodies exist; names reserved in the 2.3 property declaration table meanwhile so the Inspector and Lua agree on vocabulary
+- [ ] Forces/velocity on parts — builds on the dynamic-body layer §3.6 shipped (unanchored parts simulate in a session); this is exposure of `ApplyForce`/velocity through the bound API
+- [ ] Material properties per part (friction, bounciness, mass) on the bodies §3.6 shipped; the `Float` property kind §3.6 added is what will carry them, so the Inspector and Lua agree on vocabulary
 **Acceptance criteria:** A script raycasts to find what's ahead, pushes a dynamic part with a force, and sets friction/bounciness that observably change how it slides and bounces.
-**Difficulty:** 🟠 raycasts · 🔴 forces/velocity (blocked on 3.6's dynamic bodies) · 🟡 material properties once bodies exist
+**Difficulty:** 🟠 raycasts · 🟠 forces/velocity (builds on §3.6's landed dynamic layer) · 🟡 material properties once bodies exist
 
 ### Milestone 3.12 — Per-player persistent data API (DataStore equivalent)
-- [ ] Design doc before code (same bar as 3.2): where the data lives under P2P hosting (§7.2) — host-held with client cache vs. each-peer-owns-own — settled before any storage code
+- [ ] Design doc before code (same bar as 3.2): where the data lives under P2P hosting (§8.2) — host-held with client cache vs. each-peer-owns-own — settled before any storage code
 - [ ] Key/value per-player store with read/write through the bound API; enforcement-relevant reads stay host-authoritative (§1.3)
-- [ ] On-disk slot reserved in the §8.1 `.lot` format for player data, decided together with the format rather than bolted on later
+- [ ] On-disk slot reserved in the §4.1 `.lot` archive for player data (its own entry alongside `lot.json` / `scripts/`), decided with the format rather than bolted on later
 **Acceptance criteria:** A script saves a player's coins, the value survives a lot reload, and the ownership model is documented — no silent "client tells the host its balance" trust hole.
 **Difficulty:** 🟠 storage · 🔴 ownership design (decide early)
 
+### Milestone 3.13 — Spatial query primitives
+*The primitive behind area triggers, melee hitboxes and explosion radiuses: a region asks "what is inside me", and every other shape of query is built on that answer.*
+- [ ] Query shapes — sphere and box overlap plus shape casts (the raycast path already exists internally in `PartDragController`; this is exposure plus the missing shapes) — callable from Lua through the bound API (§1.1) and from the editor
+- [ ] Placeable **query volume objects**: an insertable object (`LotObjectKind.QueryVolume`, spawned from the Toolbox like a Capsule, §3.4) that runs its query each tick and reports what is inside/overlapping, so a creator places a trigger the way they place a part
+- [ ] Results come back as handles/part references, never raw Godot objects, and are batched once per frame rather than one Lua↔C# crossing per hit (§2.4 boundary-crossing rule)
+- [ ] Broad-phase before narrow-phase: candidates are filtered by AABB + collision layer/mask (§3.5) before exact shape tests, so a large-radius query over many parts stays cheap
+- [ ] Feeds the §3.7 event system — an overlap volume's enter/exit result is what raises `touched` / `entered` / `exited`, so area triggers ride the existing event path instead of a second subscription mechanism
+- [ ] Melee-hitbox and explosion-radius helpers built on the same primitive (radial query + distance falloff), not separate one-off paths; anything that *pushes* what it finds rides §3.6's landed dynamic layer, exactly like §3.11's forces
+**Acceptance criteria:** A creator places a query volume, a script reads which parts are inside it each frame, a melee hitbox reports the parts it swept, and an explosion reports everything within its radius — all through the same query API, with no per-hit Lua call storm.
+**Difficulty:** 🟠 query shapes + volume object · 🟠 result batching · 🟠 push-on-hit (rides §3.6's landed dynamic layer)
+
 ---
 
-## 4. Terminal / Menu UI
+## 5. Terminal / Menu UI
 
 *Status: functionally complete from the Unity prototype; migration to Godot in progress (main menu + terminal already moved and fixed up as of today).*
 
-### Milestone 4.1 — terminal system part 2
-- [ ] Re-verify command set parity: help, openlot (join/host/list/create), clear, neofetch, sysinfo, motd, ping, matrix, register/login/logout, theme, alias, ls, avatar, disconnect, registertopublic
+### Milestone 5.1 — terminal system part 2
+- [ ] Re-verify command set parity: help, openlot (join/host/list/create), clear, neofetch, sysinfo, motd, ping, matrix, register/login/logout, theme, alias, ls, avatar, disconnect, registertopublic, wallpaper (added by §2.3)
 - [ ] Re-verify auth gate (login/register/help/clear open pre-login, everything else locked)
 - [ ] Re-verify "openlot list" interactive TUI selection flow into a lot
 **Acceptance criteria:** Every command from the Unity terminal build works identically in the Godot port, auth gating behaves the same, and TUI list navigation loads a selected lot.
 **Difficulty:** 🟩/🟠 (Rolkka-owned, feel/fit-and-finish)
 
-### Milestone 4.2 — In-lot command UI
+### Milestone 5.2 — In-lot command UI
 - [ ] Design and build an in-game window/UI system for commands while inside a lot (the old TerminalOutput UI was removed from LocalLot for being buggy there — needs a proper replacement, not a reuse)
 **Acceptance criteria:** A player/creator can open a command UI while inside a live lot without the bugs that broke the previous in-lot terminal attempt.
 **Difficulty:** 🟠
 
-### Milestone 4.3 — Lot UI customization
+### Milestone 5.3 — Lot UI customization
 - [ ] More customization options for lot UI elements (`LotUIRoot`), using the same typed property widgets as 2.3
 - [ ] Checkbox and dropdown controls available as lot UI elements, not only in the editor (new `LotUIKind`s — today it is Frame/Button/Text/Scrollbar)
 - [ ] Scrollable containers for lot UI, using ImGui's existing child-region support (`BeginChild`) for clipping and scrolling rather than the current `Scrollbar` kind, which draws a static thumb over nothing
 - [ ] Click routing that reaches script handlers: element presses resolved through ImGui item state inside the viewport window, extended past today's editor-only selection/drag path in `UiGizmoController` to actual activation during a player session
 - [ ] Customization properties settable from Lua
-*Note: the click-routing and scroll-container items share the blocker with the in-lot command UI in 4.2 and the player-originated `net.*` attribution item in 3.4 — the ImGui primitives exist, but there is no in-session path from a lot UI press to a script handler yet.*
+*Note: the click-routing and scroll-container items share the blocker with the in-lot command UI in 5.2 and the player-originated `net.*` attribution item in 3.4 — the ImGui primitives exist, but there is no in-session path from a lot UI press to a script handler yet. The new element kinds and the whole lot UI tree are persisted through §4.1's `lot.json`, so a saved lot carries its UI without a second format.*
 **Acceptance criteria:** A creator can build a lot UI panel with a checkbox, a dropdown and a scroll area, style it, and have a script react to its values.
 **Difficulty:** 🟠 (ImGui supplies scrolling and item-state hit-testing; the work is element kinds, property wiring, and extending routing to in-session activation)
 
-### Milestone 4.4 — Client settings system
+### Milestone 5.4 — Client settings system
 - [ ] Settings screen grown from the existing theme-only window (`Terminal.DrawSettingsWindow`) into a real, tabbed settings surface
 - [ ] Camera settings: FOV, mouse sensitivity (already fields on `FreecamController` / `OrbitalCamera`, currently hardcoded to 0.15), invert-Y, and a scope decision (per-camera or global)
 - [ ] Graphics settings: resolution scale / viewport size, shadow toggle, MSAA, render method — applied live where Godot allows it
-- [ ] Settings persisted to disk and applied on startup, with a restore-defaults action
+- [ ] Window styles: a shared window-chrome pass on top of `EditorChrome.PanelWindowFlags` — window rounding, border size/colour, padding, title-bar alignment, frame/item spacing — pushed once at the top of every layout pass and popped at its end (`Terminal.OnLayout` + `Builder.DrawLayout`) through the wrapper's existing `PushStyleVar` / `PushStyleColor` (`ImGui.State.cs` already exposes `StyleVarWindowRounding`, `StyleVarWindowPadding`, `ColWindowBg`, `ColTitleBg` and the rest), so the terminal windows, builder panels and dialogs wear one consistent chrome instead of today's default ImGui look. **Per-window overrides and per-lot creator styles are deliberately out of scope** — player-facing lot UI styling is §5.3's territory, not the client theme's
+- [ ] Fonts and themes: one shared theme service owning the palette, the window style set above and the fonts together — UI font selection (the ImGui wrapper already exposes `AddFontFromFile` / `PushFont` / `MergeIconFontFromFile`, so this is selection + persistence, not new plumbing) — today's two palettes are hardcoded terminal-local `Color` fields (`Terminal.ApplyGreenMatrixTheme` / `ApplyAmberRetroTheme`), so this lifts them into one theme applied across the terminal, builder panels and lot UI instead of per-surface colours. One global theme, not per-surface ones, so the terminal and build mode can never drift apart
+- [ ] Preset themes (Green Matrix, Amber Retro, plus a neutral default) with a custom palette and window-shape option set, previewed live rather than apply-and-see
+- [ ] Settings persisted to disk and applied on startup, with a restore-defaults action — the theme, window-style and font blocks land in the existing `user://openlot_settings.cfg` as new `[theme]` / `[window_style]` / `[font]` sections next to `[wallpaper] source_path`, rather than a second config format
 - [ ] Settings reachable in-lot as well as from the main menu, so a player can change them without leaving a session
-**Acceptance criteria:** A player can open settings from the main menu or in-lot, change FOV/sensitivity/graphics options, see them take effect immediately, and find them still applied after restarting the client.
-**Difficulty:** 🟠 FOV/sensitivity/persistence · 🟠 graphics options · 🟠 in-lot access
+**Acceptance criteria:** A player can open settings from the main menu or in-lot, change FOV/sensitivity/graphics options, pick a font and theme, adjust window rounding/border/padding and title styling, see them take effect immediately across the terminal and builder, and find them still applied after restarting the client.
+**Difficulty:** 🟠 FOV/sensitivity/persistence · 🟠 graphics options · 🟠 fonts/themes/window styles · 🟠 in-lot access
+**Verification:** a headless round-trip self-test on the theme service (parse → apply → persist → reload, the same shape as `WallpaperSelfTest`) pins the config contract; the on-screen result (colours, rounding, borders, font metrics) is a rendering outcome checked by eye in the running client, the project's usual split.
 
-### Milestone 4.5 — Keybinding customization
-- [ ] Rebindable keys for editor tools, camera and player controls, with conflict detection and a restore-defaults action (feeds §4.4's settings screen)
+### Milestone 5.5 — Keybinding customization
+- [ ] Rebindable keys for editor tools, camera and player controls, with conflict detection and a restore-defaults action (feeds §5.4's settings screen)
 **Acceptance criteria:** A player rebinds a key, and both the editor and in-lot controls use the new binding after a restart.
 **Difficulty:** 🟠
 
+### Milestone 5.6 — Tiling window modes (Hyprland-style)
+*Windows are free-floating today. Docking was deliberately turned off (`EditorChrome`) because the dock-node double-click "maximize" gesture cannot be disabled from the wrapper, and the accepted cost was "panels can no longer be dragged into dock splits". This milestone gives that arrangement back without re-enabling docking: OpenLot computes every tile itself each layout pass and hands windows their rect via `SetNextWindowPos` / `SetNextWindowSize` (`CondAlways`), so the broken gesture cannot return and the vendored GDExtension needs no patch. The headline arrangement is **viewport focus** — the 3D view owns the master tile so most of the screen is the scene, with the panels stacked along the edge — plus Hyprland's signature gaps and focus border riding on §5.4's window-style service.*
+- [ ] Global mode toggle — **Floating** (today: windows drag, resize and persist geometry in `user://imgui.ini`) ↔ **Tiled** (the layout owns geometry; windows run `NoMove` / `NoResize` while tiled and `TitleBarWindowDrag` is bypassed rather than allowed to fight the computed rect). The bottom command strip (`BuilderCommandLine`) is not a tile — it keeps its fixed full-width slot
+- [ ] Per-window float toggle (the `togglefloating` equivalent): any single window can pop back to floating while the rest stay tiled, from the View menu — and from the window itself if a title-bar affordance proves clean, since `WindowNoCollapse` already spends the title-bar double-click on nothing
+- [ ] Layout presets — at minimum **Viewport focus** (master = the 3D viewport at a default ~0.7 ratio; secondary column = Toolbox / Inspector / Hierarchy / Output, plus the Code Editor when open) and an even two-column split; the master ratio is adjustable by dragging the tile divider, which is the standard resize gesture because window grips are off in tiled mode
+- [ ] Hyprland-flavoured trimmings on top of §5.4: gaps between tiles (size setting, 0 = off), rounded corners and border size/colour from the shared window-style set, plus a focus-coloured border on the active tile
+- [ ] Applies to builder panels and terminal windows alike (`Builder.DrawLayout` and `Terminal.OnLayout` resolve the same layout); modals, dialogs and file pickers never tile — they stay floating above the layout — and the wallpaper's under-dockspace window is untouched
+- [ ] **Floating geometry survives a tiled stint**: tiled rects must not overwrite the remembered floating positions (e.g. tiles run `WindowNoSavedSettings` while tiled so the last floating rect stays in `imgui.ini`); toggling back finds windows where they were, not in their tiles
+- [ ] Tiling is client preference, never lot state: mode, preset, gap and per-window float flags persist in a `[layout]` section of `user://openlot_settings.cfg` beside §5.4's blocks. Deliberately out of scope in the first cut: animated tile transitions (instant geometry per frame) and keyboard-driven tiling commands (that would be §5.5 territory if ever wanted)
+- [ ] Game mode is untouched (its viewport is already fullscreen and the editor chrome is not drawn), and the standing interactions must work as well tiled as floating: the hierarchy's marquee and drag-drop, the viewport's click-claiming, and the 3D `SubViewport` following its computed tile size the same way it follows a manual resize today
+**Acceptance criteria:** A creator toggles tiling on, the viewport takes most of the screen with the panels tiled around it, drags the divider to rebalance, floats one window back out, toggles everything back to floating and finds the free positions exactly as they were, and the choices survive a restart.
+**Difficulty:** 🟠 layout engine + gesture interplay · 🟡 presets / gaps / persistence
+**Verification:** the layout math (per-preset rect derivation, master ratio, gap application, float bookkeeping) as a headless self-test in the `*SelfTest` pattern — pure geometry, fully testable without eyes; the on-screen feel (gaps, focus border, divider drag) is a rendering outcome checked by eye in the running client, the project's usual split.
+
 ---
 
-## 5. Characters, 3D meshes
+## 6. Characters, 3D meshes
 
 *Capsule prototyping moved to §3.4 — it is a runtime concern (Test mode needs a controllable character to be meaningful), not an art/asset one.*
 
-### Milestone 5.1 — Rigged characters
+### Milestone 6.1 — Rigged characters
 - [ ] R6-style rig support
 - [ ] Body part tagging
 - [ ] .avlot format: accessories/3D mesh attachment
@@ -338,20 +486,21 @@ Legend for difficulty tags carried over from the original planning pass:
 **Acceptance criteria:** A rigged character loads with attached accessories and plays a tagged walk/jump animation correctly triggered by movement state.
 **Difficulty:** 🔴 R6 rig · 🟠 accessories/animation tagging
 
-### Milestone 5.2 — Runtime GLTF/rigged mesh loading/ Accessory application
+### Milestone 6.2 — Runtime GLTF/rigged mesh loading/ Accessory application
 - [ ] Runtime loading of rigged 3D meshes (GLTF) with custom textures for characters/accessories
 - [ ] Confirm GLTFDocument/GLTFState API + Load() pattern works end-to-end for OpenLot's asset pipeline
+- [ ] Route loading through **`LotVFS` (§4.1)**: the `.glb` and its textures arrive as buffers out of the lot archive's `assets/` (`GltfDocument.AppendFromBuffer` + `GltfState`), never as loose files on disk — the pack the archive ships is the pack the runtime reads, and this is the seam §14.6's asset browser later plugs into
 - [ ] Character Edit UI (Inside game creation Environment) Accessory placement, 2d clothing.
 **Acceptance criteria:** A character rig with a custom texture loads at runtime from a GLTF file with no editor pre-import step.
 **Difficulty:** 🟠 
 
 ---
 
-## 6. Animation System & Audio
+## 7. Animation System & Audio
 
 *Custom systems, not Godot's built-in animation tooling.*
 
-### Milestone 6.1 — .lanim format + tooling
+### Milestone 7.1 — .lanim format + tooling
 - [ ] Animator UI (Roblox Animator-style)
 - [ ] Real-time animation-to-code conversion
 - [ ] Animation smoother, toggleable for a retro/choppy look option
@@ -359,51 +508,46 @@ Legend for difficulty tags carried over from the original planning pass:
 **Acceptance criteria:** A creator can key a simple animation in the Animator UI, export it as .lanim, and see it play correctly on a rigged character in-lot, with the smoother togglable.
 **Difficulty:** 🔴 Animator UI · 🟠 real-time conversion · 🟡 smoother
 
-### Milestone 6.2 — Audio system
+### Milestone 7.2 — Audio system
 - [ ] Sound playback/mixing, 3D positional audio, and an audio pool (no audio exists in the project today)
 - [ ] Audio bound into the Lua API so scripts can play cues (verb-first methods per §2.2)
 **Acceptance criteria:** A script can play a sound on an object and a player hears it positioned at that object in the lot.
 **Difficulty:** 🔴 (nothing exists yet) · 🟠 Lua binding
 
+### Milestone 7.3 — Sound service / audio emitters
+- [ ] `SoundEmitter` — an **insertable object** (spawned from the Toolbox like a Capsule, §3.4) that plays a sound positioned in the 3D world with range/falloff, parented to whatever it is attached to so it moves with that object
+- [ ] Built on §7.2's pool and mixer rather than a second playback path — the emitter is the object-facing front end of the pool the audio system already owns
+- [ ] Per-emitter properties through the §2.3 `LotPropertyRegistry` (sound asset, volume, pitch, loop, 3D range/falloff, playing), so the Inspector and the Lua verbs come from one declaration per §2.2
+- [ ] Fired from Lua (`PlaySound` / `StopSound` / `SetSoundVolume`, verb-first per §2.2) and from the §3.7 event system, so a `touched` handler can trigger a cue with no new plumbing
+- [ ] Sound assets are the archive's `assets/` audio read through `LotVFS` (§4.1), and the emitter serializes in `lot.json` — a saved lot ships its sounds
+- [ ] A cue other players must hear is fired through `net.server` (host-authoritative, §1.3); a purely local cue stays local — the same origination rule the rest of the runtime uses
+**Acceptance criteria:** A script plays a sound on an emitter object and a player hears it positioned at that object with the emitter's range applied, and the same cue is still there after the lot is saved and reloaded.
+**Difficulty:** 🟠 emitter object + property wiring · 🟠 Lua/event firing · 🟠 persistence (asset bytes via §4.1)
+
 ---
 
-## 7. Networking
+## 8. Networking
 
-### Milestone 7.1 — Session model
+### Milestone 8.1 — Session model
 - [ ] Host/join/list session model
 - [ ] State sync across clients
-**Acceptance criteria:** Two clients can join the same hosted lot and see each other's characters move in real time with acceptable sync.
+- [ ] **Headless runtime bootstrapping:** a `--lot <path>` CLI flag starts a dedicated host that opens a `.lot` archive through `LotVFS` (§4.1), reads `manifest.json` for `maxPlayers` and the **entry script**, runs that script as the lot root, and joins the session model as host — **bypassing UI and rendering viewport nodes**: no ImGui/dockspace, no `ViewportWindow` / `SubViewport` / camera nodes are created; only physics, the `net.*` router and `ScriptRuntime.Tick` run. Composes with Godot's own `--headless` flag (no display server); the same binary is a player client when launched without `--lot`.
+- [ ] Bind the transport through the existing **`INetTransport` seam** (`NetTransport.cs`), replacing `LoopbackTransport` for a networked session — the router and wire codec are already transport-agnostic, so a headless host and a client pick their transport by role rather than a hardcoded peer id (§8.2 rule)
+**Acceptance criteria:** Two clients can join the same hosted lot and see each other's characters move in real time with acceptable sync; the same `.lot` can be started UI-less as a dedicated host via `--lot <path>` and accept a joining client.
 **Difficulty:** 🔴 🔴 — highest-research items on the whole roadmap; budget real standalone research time here
 
-### Milestone 7.2 — Decentralized/self-hosting model
-- [ ] Peer-to-peer hosting path (free/default option, alongside Providers — see §11)
+### Milestone 8.2 — Decentralized/self-hosting model
+- [ ] Peer-to-peer hosting path (free/default option, alongside Providers — see §13)
 **Acceptance criteria:** A user can host a lot from their own machine and have it be joinable/discoverable without a Provider in the loop.
 **Difficulty:** 🔴
 
-### Milestone 7.3 — Chatting system
-*(moved from §12 — chat is part of the playable core, not a post-MLP extra)*
+### Milestone 8.3 — Chatting system
+*(moved from §14 — chat is part of the playable core, not a post-MLP extra)*
 - [ ] Chat Bubble support
 - [ ] Chatting UI
-- [ ] Private chat (P2P without messages hitting the server they are in) — depends on 7.1's transport; the two items above can land on the existing `LoopbackTransport` path first
+- [ ] Private chat (P2P without messages hitting the server they are in) — depends on 8.1's transport; the two items above can land on the existing `LoopbackTransport` path first
 **Acceptance criteria:** A player can send chat that others in the lot see as a bubble and in the chat UI, with private chat routed peer-to-peer.
-**Difficulty:** 🟠 (bubbles/UI) · 🔴 (private P2P chat, until 7.1 exists)
-
----
-
-## 8. Save/load & lot persistence
-
-### Milestone 8.1 — .lot format & versioning
-- [ ] Define the `.lot` schema and a format version field, plus the migration path for older files
-- [ ] Define the serialized payload: 3D objects, lot UI elements (`LotUIRoot`), script references, and lot metadata (name, environment settings)
-**Acceptance criteria:** The `.lot` format is documented and versioned, and a file written by an older build is either migrated or rejected with a clear error rather than failing silently.
-**Difficulty:** 🟠
-
-### Milestone 8.2 — Save/load
-- [ ] Save a creation as a `.lot` file
-- [ ] Load a saved creation, same device
-- [ ] Transfer and load a saved creation on a different device (may be held for later)
-**Acceptance criteria:** A lot built on one machine can be saved, copied to a second machine, and loaded there with all objects, UI elements and scripts intact.
-**Difficulty:** 🟠
+**Difficulty:** 🟠 (bubbles/UI) · ⛔️ private P2P chat (waits on §8.1)
 
 ---
 
@@ -429,21 +573,50 @@ Legend for difficulty tags carried over from the original planning pass:
 
 # POST MLP
 
-## 10. Modding / Plugin System
+## 10. Mobile Support (Android)
 
-### Milestone 10.1 — Tier 1: Terminal apps
+*OpenLot on phones and tablets. The core is portable — Godot's Android export carries the renderer, physics and the same C#/Lua runtime, and the network path is §8's session model unchanged, so mobile is a client, not a new transport. What is **not** portable is the interaction model: every surface today assumes mouse hover, a right mouse button, a keyboard and freely positioned windows, and a touchscreen has none of those. Sits ahead of §11 by design — player reach on Android is a distribution question, the plugin tiers are a creator-ecosystem one — and the real work is the restructuring below, not the export.*
+
+### Milestone 10.1 — Android client build & touch input foundation
+- [ ] Android export of the player client (arm64; the renderer choice — Forward+/Mobile on Vulkan vs the Compatibility (GLES3) path — decided and documented against real device coverage, not assumed)
+- [ ] Touch enters through the §3.9 input abstraction (this milestone depends on it landing): on-screen movement (virtual stick or touch-steer), camera look by drag, and jump/interact buttons map to the same logical actions a keyboard binds to — scripts and the §3.4 capsule controller keep seeing logical actions only
+- [ ] Device basics: safe-area/notch insets, DPI-aware sizing (the `DisplaySetup` content-scale decision revisited for touch), and mobile defaults for §5.4's graphics settings (resolution scale, shadows, MSAA) chosen once and persisted like any other setting
+**Acceptance criteria:** The default lot is playable on an Android phone with touch alone — spawn, move, look, jump — with no desktop input assumed anywhere on the way in.
+**Difficulty:** ⛔️ waits on §3.9's input abstraction · 🟠 export + input mapping · 🟡 device basics
+
+### Milestone 10.2 — Touch-first UI restructuring
+*The touchscreen feel is the real work: the editor-style UI assumes hover, right-click and precise clicking everywhere. This is a restructuring pass over the shared ImGui surfaces — one UI system (§1.2) — not a second mobile UI.*
+- [ ] No hover-dependent affordance survives on touch paths: hover states get tap equivalents, right-click context menus answer to long-press, hit targets meet finger sizes (a touch sizing set in §5.4's window-style service, not per-surface tweaks), and gestures that fight scrolling are resolved per surface
+- [ ] Window model: free-floating windows do not fit a phone — reuse §5.6's computed-tile layout as a one-column full-screen stack with per-surface switching, so the same layout engine that tiles the desktop stacks the phone
+- [ ] Software keyboard: terminal command entry, chat (§8.3), text fields and search raise the IME without corrupting the ImGui layout, and dismissing it restores focus
+- [ ] Player-facing surfaces get their touch passes: in-lot UI (§5.3, including touch-friendly element sizing and the scroll containers), the in-lot command UI (§5.2), chat (§8.3) and in-lot settings (§5.4)
+- [ ] Creation-environment scope decided and documented (decided here, not assumed in code): recommended first cut is settings + terminal + chat touch-workable, with the 3D build mode desktop-only until it earns its own milestone
+**Acceptance criteria:** A player on a phone navigates menus, opens the terminal and runs a command with the on-screen keyboard, joins a lot, moves their character, chats and changes settings — with no surface unreachable because it required hover or right-click.
+**Difficulty:** 🟠 restructuring pass · 🟠 window model reuse · 🟠 software keyboard (IME)
+
+### Milestone 10.3 — Android release readiness
+- [ ] Lifecycle: background/resume without dropping the session (pause-menu semantics while backgrounded), orientation handling, and battery/thermal-aware frame pacing
+- [ ] Packaging: signed APK/AAB, build versioning tied to the client build, and a device matrix (screen sizes, DPI, GPU tiers, paired controllers via §14.1) recorded with results
+**Acceptance criteria:** A signed build installs from the artifact onto a fresh device, backgrounds and resumes mid-session, and the matrix records what passed on which hardware.
+**Difficulty:** 🟠 lifecycle · 🟡 packaging
+
+---
+
+## 11. Modding / Plugin System
+
+### Milestone 11.1 — Tier 1: Terminal apps
 - [ ] Package-manager-style install command (apt-like)
 - [ ] Sandboxed execution inside the terminal via its own API only
 **Acceptance criteria:** A third-party terminal app installs via the package manager and runs correctly without touching anything outside the terminal API surface.
 **Difficulty:** 🟠
 
-### Milestone 10.2 — Tier 2: Creation-environment plugins
+### Milestone 11.2 — Tier 2: Creation-environment plugins
 - [ ] Package-manager install path shared with Tier 1
 - [ ] Defined plugin API extending build-mode (tools/panels/importers)
 **Acceptance criteria:** A sample plugin adds a new tool/panel to build mode using only the published plugin API.
 **Difficulty:** 🟠
 
-### Milestone 10.3 — Tier 3: Deep/engine-level plugins
+### Milestone 11.3 — Tier 3: Deep/engine-level plugins
 - [ ] Document the boundary where Tier 3 plugins reach past OpenLot's API into Godot itself
 - [ ] Custom optimization/shader plugin support
 **Acceptance criteria:** A documented example shows a Tier 3 plugin modifying rendering behavior directly, with clear docs on what's supported vs. unsupported.
@@ -451,91 +624,125 @@ Legend for difficulty tags carried over from the original planning pass:
 
 ---
 
-## 11. Providers & Platform Economy
+## 12. Benchmarks
 
-*Separate from free peer-to-peer hosting (§7.2), which remains available.*
+*Two jobs: keep the project honest to itself, and back its central claim. The repo's performance-review rules ("no per-frame allocations", "avoid bloat") only bite when there are numbers to check them against, and the lightweight-versus-Unity/Roblox-bloat thesis is an assertion until it is measured — credibility that matters before §13's provider economy puts those claims in front of paying users.*
 
-### Milestone 11.1 — Provider system core
+### Milestone 12.1 — Benchmark harness
+- [ ] One command produces the numbers on any machine — headless, extending the existing headless/`--quit-after` test pattern, no new dependency: startup-to-menu, lot load + save (§4.2) for a standard scene, a fixed N-part physics scene's frame time, Lua↔C# dispatch throughput through the §3.2 bridge, build-mode editor frame time, and memory (managed heap + process RSS)
+- [ ] Deterministic and repeatable: fixed scenes, fixed frame counts, fixed seed; results print as a table and are stored per run so a regression between builds shows as a diff — raw numbers plus the machine description, since absolute numbers are hardware-relative
+**Acceptance criteria:** A maintainer runs one command and gets today's numbers; two builds' results diff cleanly enough to see a regression; every workload is documented next to the harness.
+**Difficulty:** 🟠 deterministic workloads + result storage
+
+### Milestone 12.2 — Published comparison numbers
+- [ ] A methodology-documented comparison against a Unity/Roblox baseline on the same workloads and hardware — measuring what the respective licences permit and stating plainly what could not be measured rather than estimating it
+- [ ] Published (site/README) and refreshed at each release; the rules stated once: same hardware, same scene, raw numbers plus methodology, no cherry-picking
+**Acceptance criteria:** A published table exists whose method a sceptic can repeat; OpenLot's own materials cite it instead of asserting.
+**Difficulty:** 🟠 methodology + baseline measurement
+
+---
+
+## 13. Providers & Platform Economy
+
+*Separate from free peer-to-peer hosting (§8.2), which remains available.*
+
+### Milestone 13.1 — Provider system core
 - [ ] Provider listing/discovery mechanism (third parties list games on their own discoverable list)
 - [ ] Provider-managed hosting path as an alternative to self-hosting
 - [ ] Per-provider configurable ToS, pricing, rules, moderation policy, age-safety tier
 - [ ] Liability model: explicitly provider-owned, not OpenLot-owned, reflected in docs/ToS templates
 **Acceptance criteria:** A third-party provider can register, set their own rules/pricing/age-tier, and list/host a game, with OpenLot's own docs clearly scoping liability to the provider.
-**Difficulty:** 🔴 (new, largely undesigned below the concept level)
+**Difficulty:** 🔴 new · ⭕️ largely undesigned below the concept level
 
-### Milestone 11.2 — Official OpenLot provider
+### Milestone 13.2 — Official OpenLot provider
 - [ ] Stand up Rolkka's own instance as the official provider
 - [ ] Self-custody USDC flow for creator payouts (wallet-to-wallet, no provider custody)
 - [ ] No minor monetization at launch — minors earn/buy only through a parent-held wallet
 **Acceptance criteria:** A creator on the official provider can receive a USDC payment directly to their own wallet with the provider never holding funds in the loop.
 **Difficulty:** 🔴 (custody-avoidant design already settled; implementation still open)
 
-### Milestone 11.3 — Monetization features (official provider)
+### Milestone 13.3 — Monetization features (official provider)
 - [ ] Managed hosting tiers (bandwidth/storage tiers, priority slots)
 - [ ] Discovery/promoted placement in game listings
 - [ ] Creator "Pro" subscription tier (extra plugin slots, higher limits, analytics)
 - [ ] Player "Plus" subscription tier (cosmetic perks, exclusive access)
 - [ ] (Later stage) B2B "OpenLot Cloud" hosted backend infra + consulting for third-party providers
 **Acceptance criteria:** A creator can subscribe to Pro and immediately see raised limits/analytics access; a player can subscribe to Plus and receive a cosmetic perk.
-**Difficulty:** 🟠 hosting tiers/subscriptions · 🔴 B2B infra (post-MLP, needs an actual provider ecosystem first)
+**Difficulty:** 🟠 hosting tiers/subscriptions · ⛔️ B2B infra (waits on the provider ecosystem existing — post-MLP)
 
-### Milestone 11.4 — Official plugins (post-MLP stage)
+### Milestone 13.4 — Official plugins (post-MLP stage)
 - [ ] Ko-fi / Patreon API integration plugin for gamepasses/paid games
 - [ ] Roblox compatibility tools, staged least-to-most advanced (Lua API shim scoping, R6/R15 rig mapping research, asset importer)
 - [ ] "Bender" — precise object-bending creation tool
+- [ ] "EZLot" — official UI navigation shell over the terminal command surface (`openlot join/host/list`, theme, wallpaper, avatar, register/login, …): every command gets a clickable equivalent so the whole app is comfortably navigable without typing; built as a Tier 1 plugin (terminal/window-API-only, §1.4) so it doubles as the reference proof that third-party UI apps need no core access — the terminal stays as the power-user path
 - [ ] (More TBD as MLP usage reveals gaps)
-**Acceptance criteria:** Ko-fi/Patreon plugin lets a creator gate a paid game/gamepass without OpenLot ever touching payment custody; Roblox compat tier list published even if only partial shimming is implemented.
-**Difficulty:** 🟡 Ko-fi/Patreon · 🔴 Roblox compat (start scoping/research early, don't wait for "last stage" to begin) · 🟠 Bender
+**Acceptance criteria:** Ko-fi/Patreon plugin lets a creator gate a paid game/gamepass without OpenLot ever touching payment custody; Roblox compat tier list published even if only partial shimming is implemented; a user who never opens the terminal joins/hosts/lists lots and changes theme/wallpaper/avatar entirely through EZLot.
+**Difficulty:** 🟡 Ko-fi/Patreon · 🔴 Roblox compat (start scoping/research early, don't wait for "last stage" to begin) · 🟠 Bender · 🟠 EZLot shell (UI over existing commands)
 
 ---
 
-## 12. More Sophisticated Characters, Extra features (might change)
+## 14. More Sophisticated Characters, Extra features (might change)
 
-### Milestone 12.1 — Controller / gamepad support *(Post-MLP)*
-- [ ] Gamepad input for player movement, camera look and UI navigation, including rebinding
+### Milestone 14.1 — Controller / gamepad support *(Post-MLP)*
+- [ ] Gamepad input for player movement, camera look and UI navigation, including rebinding — routed through the §3.9 input abstraction so desktop and the §10 Android client (paired controllers) share one binding set instead of growing a second gamepad path
 **Acceptance criteria:** A player can move, look and navigate lot UI with a controller.
 **Difficulty:** 🟠
 
-### Milestone 12.2 — Template lots *(Post-MLP)*
-- [ ] Shippable starter lots (obby, hangout, sandbox) that a creator can open as a starting point — depends on §8.2 save/load
+### Milestone 14.2 — Template lots *(Post-MLP)*
+- [ ] Shippable starter lots (obby, hangout, sandbox) that a creator can open as a starting point — on §4.2's landed save/load
 **Acceptance criteria:** A creator can open a template lot from the menu, edit it, and save it as their own.
-**Difficulty:** 🟡 once §8.2 exists · 🔴 authoring the templates themselves
+**Difficulty:** 🟡 (unblocked — §4.2 landed) · 🔴 authoring the templates themselves
 
-### Milestone 12.3 — Localization *(Post-MLP — to be decided)*
-*Still to be planned — scoped after §8's save format exists, since string tables need a defined on-disk home and a versioning story. Candidate ground: string tables replacing hardcoded text in the terminal, panels and Lua-facing messages, plus runtime language switching.*
-**Difficulty:** TBD
+### Milestone 14.3 — Localization *(Post-MLP — to be decided)*
+*Still to be planned — scoped after §4's save format exists, since string tables need a defined on-disk home and a versioning story. Candidate ground: string tables replacing hardcoded text in the terminal, panels and Lua-facing messages, plus runtime language switching.*
+**Difficulty:** ⭕️ (unscoped — plan it once §4's format is settled)
 
-### Milestone 12.4 — R16
+### Milestone 14.4 — R16
 - [ ] R16-style rig support
 - [ ] Tagging for the R16
 **Difficulty:** 🟠
 
-### Milestone 12.5 — Vehicle mechanics
+### Milestone 14.5 — Vehicle mechanics
 *Still to be planed*
+**Difficulty:** ⭕️ (unplanned — vehicle mechanics need a scope pass)
 
-### Milestone 12.6 — Asset browser panel *(Post-MLP)*
-- [ ] Import meshes, textures and audio, then browse and drag them into the scene — one panel feeding the Texture property (2.3), background picture (2.3), audio cues (6.2) and templates (12.2), which each carry their own ad-hoc loading until this lands
+### Milestone 14.6 — Asset browser panel *(Post-MLP)*
+- [ ] Import meshes, textures and audio, then browse and drag them into the scene — one panel feeding the Texture property (2.3), wallpaper (2.3), audio cues (7.2) and templates (§14.2), which each carry their own ad-hoc loading until this lands; once §4.1 exists it also writes into the archive's `assets/` and reads back through `LotVFS`, so the browser and the runtime share one asset path
 **Difficulty:** 🟠
 
-### Milestone 12.7 — Lot snapshots / version history *(Post-MLP)*
-- [ ] Restore an earlier state after a bad edit; leans on §8 serialization, and is the history counterpart to 2.4-autosave's crash slot (autosave = latest recovery point, snapshots = named history)
+### Milestone 14.7 — Lot snapshots / version history *(Post-MLP)*
+- [ ] Restore an earlier state after a bad edit; leans on §4 serialization, and is the history counterpart to §4.1-autosave's crash slot (autosave = latest recovery point, snapshots = named history)
 **Difficulty:** 🟠/🔴 (retention + storage policy is the hard part, not the restore)
 
-### Milestone 12.8 — Spawn points, teams, and checkpoints as objects *(Post-MLP)*
+### Milestone 14.8 — Spawn points, teams, and checkpoints as objects *(Post-MLP)*
 - [ ] Placeable objects with runtime semantics (respawn routing, checkpoint capture), firing through the 3.7 event system (`playerJoined`/respawn hooks); the editor side is Toolbox/Inspector work on the 2.3 descriptor table
 **Difficulty:** 🟠
 
-### Milestone 12.9 — Leaderboard *(Post-MLP)*
-- [ ] Ordered score display over per-player data (3.12) rendered through lot UI (4.3); host-authoritative ordering per §1.3
-**Difficulty:** 🟡 once 3.12 + 4.3 exist
+### Milestone 14.9 — Leaderboard *(Post-MLP)*
+- [ ] Ordered score display over per-player data (3.12) rendered through lot UI (5.3); host-authoritative ordering per §1.3
+**Difficulty:** ⛔️ waits on §3.12 + §5.3 · 🟡 once unblocked
 
-### Milestone 12.10 — Creator credits and license metadata *(Post-MLP)*
-- [ ] Credits/license attached to assets and lots, stored in §8 lot metadata alongside the 12.6 browser entries that imported them
+### Milestone 14.10 — Creator credits and license metadata *(Post-MLP)*
+- [ ] Credits/license attached to assets and lots, stored in §4 lot metadata alongside the §14.6 browser entries that imported them
 **Difficulty:** 🟡 (metadata + display)
 
-### Milestone 12.11 — Accessibility *(Post-MLP)*
-- [ ] UI scale, colorblind-safe palettes, reduced motion — applied on top of the 4.3 lot UI layer and the 4.4 settings screen rather than per-element special cases
+### Milestone 14.11 — Accessibility *(Post-MLP)*
+- [ ] UI scale, colorblind-safe palettes, reduced motion — applied on top of the 5.3 lot UI layer and the 5.4 settings screen rather than per-element special cases
 **Difficulty:** 🟠
+
+---
+
+## 15. First-Launch Setup *(Post-MLP)*
+
+*The first thing a new user meets should not be a bare terminal prompt. On first launch OpenLot runs a short setup wizard before the main menu — theme, account and key settings in one place — with an explicit Skip that is respected forever, and a way to re-run it later from settings.*
+
+### Milestone 15.1 — First-launch setup wizard
+- [ ] First-run detection through the existing `user://openlot_settings.cfg` (a new `[setup] completed` flag next to `[wallpaper]` / `[theme]` — not a second format); the wizard shows exactly once, before the main menu, and only while the flag is unset
+- [ ] Explicit Skip for the whole wizard, plus per-step skip — skipping is a first-class choice that sets the flag, never a nag screen; a "Run setup again" entry in settings (§5.4) re-opens it any time
+- [ ] Lean step set, each writing through the service that already owns it: theme pick (§5.4 presets — Green Matrix, Amber Retro, neutral), account (register/login or continue offline, §5.1 auth gate), and key settings (sensitivity/FOV, §5.4) — no step invents its own storage or its own widgets
+- [ ] On Android (§10) the wizard is the very first surface and must be fully touch-workable from day one
+**Acceptance criteria:** A fresh install launches into the wizard; skipping lands on the main menu and never shows the wizard again; completing it persists the theme, account and settings choices; re-running from settings works.
+**Difficulty:** 🟡 (thin flow over existing services)
 
 ---
 
@@ -552,7 +759,7 @@ Creator-facing reference: **`docs/net-api.md`**.
 | Watchdog | `LuaWatchdog.cs` | Instruction budgets (200k/dispatch, 1M/script load, 4M/frame, 3 trips ⇒ circuit breaker). Hook installed **from Lua**; always cleared **from C#** first. |
 | Memory guard | `LuaMemoryGuard.cs` | `lua_setallocf` hard cap (64 MB), `OomHit` flag checked after every dispatch, VM rebuilt at a frame boundary. |
 | Net bridge | `LuaNetBridge.cs` | `IDispatchTarget`: decode args onto the raw Lua stack, dispatch, trip counting, script-name registry, OOM/deferred rebuild, script loading. |
-| Router | `NetRouter.cs` + `NetTransport.cs` | Transport-agnostic envelope/queue/rate-limit/authority core; `INetTransport` is the §7 seam (`LoopbackTransport` today). |
+| Router | `NetRouter.cs` + `NetTransport.cs` | Transport-agnostic envelope/queue/rate-limit/authority core; `INetTransport` is the §8 seam (`LoopbackTransport` today). |
 | Wire codec | `NetSerializer.cs` | Argument tags, table array/pair sections, all budgets, stack-based decode, wrapper disposal. |
 | Script runtime | `ScriptRuntime.cs` | Script discovery, per-script envs, deterministic handle order, lot-root-at-load, frame `Tick`, teardown. |
 | Lifecycle | `LuaManager.cs`, `BuilderScene.cs` | VM lifecycle/scratch path (`RunString`) and the lot world: handle registry (root = 0), load-order handles, script load via `StartScriptRuntime` (restartable — the §3.4 Test-mode re-entry seam), `_Process` tick, `StopScriptRuntime` in `_ExitTree` teardown order. |
@@ -572,12 +779,46 @@ Creator-facing reference: **`docs/net-api.md`**.
 - **Native `lua54` is not packaged yet** — Lua runs only with a compatible `liblua54.so` on the library path; bundling it is required before Test mode ships.
 - Load-time spawns are owned by their script and removed before a reload (F2 closed); handler spawns are unowned by design. Physics smoke-test timing sensitivity (F4, deferred). Scripting suspension is terminal until the lot reloads and shows as a red banner in the Viewport window.
 - Origination rule: autonomous calls (lot load, start(), timers) are System in ALL modes; Player only inside an explicit interaction scope (`NetRouter.BeginPlayerInteraction`; Test mode: `SimulatePlayerInteraction`).
+
 ---
 
-## Sequencing Notes
+## Roadmap Execution Stages
 
-- **MLP/Alpha (target Mid-late Nov 2026):** §1 Migration/terminal, §2 Creation Environment (Build Mode: 2.3 Inspector properties, 2.4 editor workflow, 2.5 lighting/environment), §3 Scripting/Runtime (§3.4 Test/Game mode + capsule character, §3.5 collision groups, §3.6 constraints/joints, §3.7 events/signals, §3.8 tween/timing, §3.9 input, §3.10 camera, §3.11 physics, §3.12 per-player data), §4 Terminal/Menu (§4.3 lot UI customization, §4.4 client settings, §4.5 keybindings), §7.3 chatting (bubbles/UI only), §8 Save/load, §9 Testing loop (§9.3 in-client reporting). This is the playable, buildable core — no monetization, no providers, no plugins yet.
-  - **Carve-outs inside the MLP set:** private P2P chat (7.3) and `playerJoined`/`playerLeft` (3.7) wait on §7.1's transport; autosave/crash recovery (2.4), environment persistence (2.5) and the player-data slot (3.12) are blocked on §8.1's `.lot` format; forces/velocity and material properties (3.11) and constraints/joints (3.6) wait on a dynamic-body layer that does not exist yet. Build the rest, land these as the dependency arrives.
-- **Post-MLP — Official Plugins (§11.4):** Ko-fi/Patreon first (cheapest, no custody issue), Roblox compatibility research started early even though shipping is later (it's the linchpin of the developer-migration growth thesis), Bender and others after.
-- **Post-MLP — Other Features:** §5.1 rigged characters, §6.1 animation system + §6.2 audio, §7.1–7.2 full networking, §10 full plugin tiers, §11.1–11.3 provider system and monetization, §12.1 controller support, §12.2 template lots, §12.3 localization (to be decided), §12.6 asset browser, §12.7 lot snapshots, §12.8 spawn points/teams/checkpoints, §12.9 leaderboard, §12.10 creator credits/license metadata, §12.11 accessibility.
+The four phases below are the **execution order** and supersede the numeric section order: **Phase 1 is §4**,
+which is hoisted in this document to sit right after §3.4 (see the banner and full section there). Phases 1–2 are
+the MLP-critical path; Phase 3 (networking/headless) and Phase 4 (avatars/animation/audio) follow it, and the
+per-milestone tags still govern what actually ships at MLP.
+
+### Phase 1 — Core Storage & Pipeline (§4.1 / §4.2 — `.lot` Archive & `LotVFS`)
+Everything durable depends on this, so it goes first: the single-file Zip `.lot` bundle (`manifest.json` /
+`lot.json` / `scripts/` / `assets/`), the `LotVFS` streaming read path, versioning + migration, and autosave /
+crash recovery to `user://autosave.lot`. Landing it here also **unblocks §2.5 (environment persistence, through
+`lot.json`)**, **§2.4 (autosave, which lives inside §4.1)**, and hands §6.2 and §14.6 their embedded-asset read
+path.
+
+### Phase 2 — In-Session Input & Script Hooks (§3.7 / §5.2 / §5.3 — Attributed Input, Events, In-Lot Command UI & Lot UI Activation)
+With a real lot now loadable, the next blocker is the missing in-session path from a player action to a script
+handler: the in-lot command UI (§5.2), lot-UI activation / click routing and the new element kinds (§5.3), and
+the `touched`/`clicked` event system carrying the §3.4 `BeginPlayerInteraction` attribution for input-driven
+events — `clicked` and lot-UI presses (§3.7; the physics-side `touched` attribution lands earlier, with §3.7
+itself). The input-driven half of all three shares one in-session blocker and lands together; event/timer
+subscriptions ride in the archive's
+`scripts/` (§4.1).
+
+### Phase 3 — Networking & Headless Host (§8.1 / §8.2 — Headless `.lot` Execution, Session Model & the `INetTransport` seam)
+Boot a `.lot` with no client (`--lot <path>`, no UI or rendering viewport nodes), stand up the real transport
+behind `INetTransport` in place of `LoopbackTransport`, and land the host/join/list session model plus state
+sync. `playerJoined`/`playerLeft` (§3.7), private P2P chat (§8.3) and the §3.12 per-player data ownership model
+unblock here.
+
+### Phase 4 — Avatars, Animations & Audio (§6.1 / §6.2 / §7.1 / §7.2 — Rigged Characters & GLTF, `.lanim` Tooling, 3D Audio)
+The visible/audible layer, once Phase 1 can ship the assets and Phases 2–3 can drive and replicate them:
+R6-style rigs + `.avlot` (§6.1), runtime GLTF/texture loading from the archive's `assets/` (§6.2), the `.lanim`
+Animator tooling (§7.1), and sound playback / 3D positional audio / the audio pool bound into Lua (§7.2).
+
+### Carve-outs and later work
+- **Carve-outs inside the MLP set:** private P2P chat (8.3) and `playerJoined`/`playerLeft` (3.7) wait on §8.1's transport (Phase 3); environment persistence (2.5) and the player-data slot (3.12) are unblocked by §4.1's `.lot` archive (Phase 1); constraints/joints (3.6) shipped with the dynamic-body layer they needed, so forces/velocity and material properties (3.11) can now build on that same layer. Build the rest, land these as the dependency arrives.
+- **MLP/Alpha scope (target Mid-late Nov 2026):** §1 Migration/terminal, §2 Creation Environment (Build Mode: 2.3 Inspector properties, 2.4 editor workflow, 2.5 lighting/environment, 2.7 precise scale gizmo, 2.8 output window), §3 Scripting/Runtime (§3.4 Test/Game mode + capsule character, §3.5 collision groups, §3.6 constraints/joints, §3.7 events/signals, §3.8 tween/timing, §3.9 input, §3.10 camera, §3.11 physics, §3.12 per-player data), §5 Terminal/Menu (§5.3 lot UI customization, §5.4 client settings, §5.5 keybindings, §5.6 tiling window modes), §8.3 chatting (bubbles/UI only), §4 Save/load (**Phase 1 — first**), §9 Testing loop (§9.3 in-client reporting). This is the playable, buildable core — no monetization, no providers, no plugins yet.
+- **Post-MLP — Official Plugins (§13.4):** Ko-fi/Patreon first (cheapest, no custody issue), Roblox compatibility research started early even though shipping is later (it's the linchpin of the developer-migration growth thesis), Bender, the EZLot UI shell, and others after.
+- **Post-MLP — Other Features:** §6.1 rigged characters, §7.1 animation system + §7.2 audio, §8.1–8.2 full networking, §10 mobile support (Android), §11 full plugin tiers, §12 benchmarks, §13.1–13.3 provider system and monetization, §14.1 controller support, §14.2 template lots, §14.3 localization (to be decided), §14.6 asset browser, §14.7 lot snapshots, §14.8 spawn points/teams/checkpoints, §14.9 leaderboard, §14.10 creator credits/license metadata, §14.11 accessibility, §15 first-launch setup.
 - **Ongoing:** Polish pass driven by real MLP usage data rather than pre-guessed priorities.

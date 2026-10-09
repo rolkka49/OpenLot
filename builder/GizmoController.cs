@@ -7,11 +7,17 @@ using Godot;
 ///
 /// This is the port of Im3d::GizmoTranslation (im3d.cpp:896), GizmoRotation (im3d.cpp:1075) and
 /// GizmoScale (im3d.cpp:1181), plus the application-side work Im3d deliberately leaves to its host.
-/// Two Im3d features are intentionally not wired:
+/// One Im3d feature is intentionally not wired:
 ///   * Local space (_local == true) needs Im3d's matrix stack, and the toolbox has no local/global
 ///     toggle yet, so translation and rotation are always world-space. (Scale is inherently
 ///     local-axis in Im3d too, so it needs no toggle.)
-///   * Snapping stays at Im3d's defaults of 0 (disabled) for all three tools; there is no snap UI.
+/// Snapping is wired through the toolbox (ToolboxPanel): its three increments resolve once per
+/// frame in FillAppData via ResolveSnap, with Alt as the hold-to-invert modifier. With the toggle
+/// off the increments stay at Im3d's 0 (disabled), so an untouched toolbox behaves as before.
+///
+/// One part of the scale tool is OpenLot-original rather than ported (milestone 2.7): a part with a
+/// mesh gets six per-face spheres (FaceScaleMath / FaceScaleBehavior) that stretch one side while
+/// the opposite face stays put, and a target without a mesh keeps the Im3d axis lines.
 /// </summary>
 public sealed class GizmoController
 {
@@ -34,6 +40,16 @@ public sealed class GizmoController
 
 	/// <summary>Last tool mode seen, so a mid-hover tool switch can drop the stale handle state.</summary>
 	private GizmoMode _lastMode = GizmoMode.Select;
+
+	// Drag history (milestone 2.4): a whole gizmo drag is one undo entry, committed on release.
+	private Node3D _dragTarget;
+	private Transform3D _dragBefore;
+	private GizmoMode _dragMode;
+	private bool _wasDragging;
+
+	// Face scale drag state (milestone 2.7). Owned here rather than in GizmoContext so the context
+	// keeps its Im3d shape; the handle ids still live in the shared state machine.
+	private FaceScaleBehavior.DragState _faceDrag;
 
 	/// <summary>
 	/// True when the gizmo owns the left mouse button, i.e. a handle is hovered or being dragged.
@@ -71,6 +87,11 @@ public sealed class GizmoController
 	/// <summary>Clears hot/active/hotDepth so no handle can carry across a target or tool change.</summary>
 	private void ResetInteraction()
 	{
+		// A drag interrupted by a selection/tool change still becomes one history entry, so the
+		// move the user already made is undoable.
+		if (_wasDragging) CommitGizmoDrag();
+		_wasDragging = false;
+		_faceDrag.Captured = false;
 		_context.ResetId();
 		WantsMouse = false;
 	}
@@ -105,6 +126,13 @@ public sealed class GizmoController
 		}
 
 		Node3D target = _builder.Selection.GetFirstValid() as Node3D;
+		// A decal's transform is derived from its face/offset/scale against the host, so a gizmo
+		// drag would be overwritten on the next refresh. A selected decal therefore shows no
+		// gizmo; it is dragged directly on the host's face instead (PartDragController).
+		if (target is LotObject lotTarget && lotTarget.Kind == LotObjectKind.Decal)
+		{
+			target = null;
+		}
 		if (target == null || (mode != GizmoMode.Translate && mode != GizmoMode.Rotate && mode != GizmoMode.Scale))
 		{
 			// No gizmo this frame: drop hover state so a stale hot handle cannot survive the
@@ -152,11 +180,14 @@ public sealed class GizmoController
 			case GizmoMode.Scale:
 			{
 				// Im3d: Vec3 scale = outMat4->getScale(); GizmoScale(...); setScale(...)
+				// The face handles (milestone 2.7) also shift the origin — that is what keeps the
+				// opposite face anchored — so the origin travels with the scale here.
 				Vector3 scale = GizmoMath.GetScale(transform.Basis);
-				changed = RunScaleGizmo(target, ref scale, draw);
+				Vector3 position = transform.Origin;
+				changed = RunScaleGizmo(target, ref scale, ref position, draw);
 				if (changed)
 				{
-					target.GlobalTransform = new Transform3D(GizmoMath.SetScale(transform.Basis, scale), transform.Origin);
+					target.GlobalTransform = new Transform3D(GizmoMath.SetScale(transform.Basis, scale), position);
 				}
 				break;
 			}
@@ -165,10 +196,64 @@ public sealed class GizmoController
 				break;
 		}
 
-		if (changed)
+		// The history hook must also see the frame a drag ENDS on: the release frame reports no
+		// change (the handle deactivates), and gating this on `changed` alone left the entry
+		// uncommitted until some later selection/tool change — which folded a following drag into
+		// the previous entry. `_wasDragging` is true exactly while an entry is open, so this call
+		// runs once more on the release frame and the commit lands where it belongs.
+		if (changed || _wasDragging)
 		{
-			_builder.MarkDirty();
+			// No MarkDirty during the drag: the commit below records one command when the drag ends,
+			// so undoing back to the save point can report the lot clean again.
+			UpdateDragHistory(target, mode);
 		}
+	}
+
+	/// <summary>
+	/// Opens an undo entry when a handle becomes active and closes it when the drag ends, so the
+	/// whole drag is one history entry instead of one per frame.
+	/// </summary>
+	private void UpdateDragHistory(Node3D target, GizmoMode mode)
+	{
+		bool dragging = _context.ActiveId != GizmoContext.IdInvalid;
+		if (dragging && !_wasDragging)
+		{
+			_dragTarget = target;
+			_dragBefore = target.Transform;
+			_dragMode = mode;
+		}
+		else if (!dragging && _wasDragging)
+		{
+			CommitGizmoDrag();
+		}
+		_wasDragging = dragging;
+	}
+
+	/// <summary>Records the finished gizmo drag as one history entry (a no-op if nothing moved).</summary>
+	private void CommitGizmoDrag()
+	{
+		Node3D node = _dragTarget;
+		Transform3D before = _dragBefore;
+		_dragTarget = null;
+		if (node == null || !GodotObject.IsInstanceValid(node)) return;
+		if (!TransformCommand.Changed(before, node.Transform)) return;
+
+		string label = _dragMode == GizmoMode.Rotate ? "Rotate"
+			: (_dragMode == GizmoMode.Scale ? "Scale" : "Move");
+		_builder.History.Push(new TransformCommand(label, node, before, node.Transform));
+	}
+
+	/// <summary>
+	/// Resolves the per-frame snap increment from the toolbox toggle and the hold-to-invert
+	/// modifier. Pure, so the interaction is verifiable without an ImGui frame (same pattern as
+	/// <see cref="ViewportWindow.ResolveCameraAuthority"/>). Holding the modifier inverts whatever
+	/// the toggle says: snap-on is briefly freed, snap-off is briefly snapped, so one key covers
+	/// both directions. With the toggle off and nothing held the result is 0, which Im3d's Snap()
+	/// treats as disabled.
+	/// </summary>
+	public static float ResolveSnap(bool enabled, float increment, bool overrideHeld)
+	{
+		return (enabled != overrideHeld) ? increment : 0.0f;
 	}
 
 	/// <summary>
@@ -184,9 +269,14 @@ public sealed class GizmoController
 		_appData.ViewportSize = new Vector2(viewportSize.X, viewportSize.Y);
 		_appData.ProjectionOrtho = camera.Projection == Camera3D.ProjectionType.Orthogonal;
 		_appData.ProjectionScaleY = GizmoProjection.ScaleY(camera, viewportSize);
-		_appData.SnapTranslation = 0.0f;      // Im3d default (im3d.h:540) — disabled
-		_appData.SnapRotation = 0.0f;         // Im3d default (im3d.h:541) — disabled
-		_appData.SnapScale = 0.0f;            // Im3d default (im3d.h:542) — disabled
+		// Snap (§2.2): resolved from the toolbox toggle and the hold-to-invert modifier once per
+		// frame, so the behaviors below read a plain increment. Rotation enters Im3d in radians
+		// (see GizmoAppData.SnapRotation) while the toolbox field is in degrees.
+		bool invertSnap = Input.IsPhysicalKeyPressed(Key.Alt);
+		ToolboxPanel toolbox = _builder.Toolbox;
+		_appData.SnapTranslation = ResolveSnap(toolbox.SnapEnabled, toolbox.MoveSnap, invertSnap);
+		_appData.SnapRotation = ResolveSnap(toolbox.SnapEnabled, Mathf.DegToRad(toolbox.RotateSnapDegrees), invertSnap);
+		_appData.SnapScale = ResolveSnap(toolbox.SnapEnabled, toolbox.ScaleSnap, invertSnap);
 		_appData.FlipGizmoWhenBehind = true;  // Im3d default (im3d.h:543)
 
 		// Screen mouse -> viewport pixels -> world ray (shared with the part drag controller, so both
@@ -450,15 +540,31 @@ public sealed class GizmoController
 	}
 
 	/// <summary>
-	/// Im3d::GizmoScale (im3d.cpp:1181). The axes are the object's own normalized columns, so the
-	/// scale is applied along its local axes; Im3d has no world/local toggle for scale either. The
-	/// center dot is the uniform handle, which scales all three components together.
+	/// Im3d::GizmoScale (im3d.cpp:1181) for targets without a mesh, plus the OpenLot face handles
+	/// (milestone 2.7) for parts. The axis handles scale along the object's own axes; the six face
+	/// spheres move ONE face while the opposite face stays put, and the center dot is the uniform
+	/// handle. Face handle positions are re-derived every frame from the mesh bounds, so a rotated,
+	/// non-uniformly scaled part's spheres sit exactly on its visual faces.
 	/// </summary>
-	private bool RunScaleGizmo(Node3D target, ref Vector3 scale, IGizmoDraw draw)
+	private bool RunScaleGizmo(Node3D target, ref Vector3 scale, ref Vector3 position, IGizmoDraw draw)
 	{
 		Vector3 origin = target.GlobalPosition;
 		float worldHeight = _context.PixelsToWorldSize(origin, _context.GizmoHeightPixels);
 		float worldSize = _context.PixelsToWorldSize(origin, _context.GizmoSizePixels);
+
+		// A target without a mesh (a model group) has no faces to put spheres on and keeps the Im3d
+		// axis lines; a decal never reaches the gizmo at all (its transform is derived — see Update).
+		LotObject lotTarget = target as LotObject;
+		Mesh mesh = lotTarget != null && lotTarget.MeshInstance != null ? lotTarget.MeshInstance.Mesh : null;
+		bool facesAvailable = mesh != null;
+		Vector3 meshMin = Vector3.Zero;
+		Vector3 meshMax = Vector3.Zero;
+		if (facesAvailable)
+		{
+			Aabb bounds = mesh.GetAabb();
+			meshMin = bounds.Position;
+			meshMax = bounds.End;
+		}
 
 		Basis basis = target.GlobalTransform.Basis;
 		Vector3[] axes =
@@ -486,7 +592,17 @@ public sealed class GizmoController
 
 		_context.BeginGizmo(GizmoId);
 
-		GizmoSphere boundingSphere = new GizmoSphere(origin, worldHeight);
+		// Pick bound: Im3d's sphere covers only its own handles next to the origin, while the face
+		// spheres sit on the part's surfaces — far outside it on a large part. The bound therefore
+		// grows to the mesh's world half-extent (plus a handle's radius of slack) when faces exist.
+		float pickRadius = worldHeight;
+		if (facesAvailable)
+		{
+			Vector3 halfExtents = FaceScaleMath.WorldHalfExtents(meshMin, meshMax, target.GlobalTransform);
+			pickRadius = Mathf.Max(worldHeight,
+				Mathf.Max(halfExtents.X, Mathf.Max(halfExtents.Y, halfExtents.Z)) + worldSize * 4.0f);
+		}
+		GizmoSphere boundingSphere = new GizmoSphere(origin, pickRadius);
 		GizmoRay ray = new GizmoRay(_appData.CursorRayOrigin, _appData.CursorRayDirection);
 		bool cursorCanPick = ImGui.IsWindowHovered()
 			|| _context.ActiveId != GizmoContext.IdInvalid
@@ -555,22 +671,57 @@ public sealed class GizmoController
 		}
 		draw.Dot(origin, _context.GizmoSizePixels * 2.0f, activeOrHot ? GizmoColors.Highlight : GizmoColors.White);
 
-		// Axes. Im3d passes &(*outVec3)[i]; a stack Span gives the same single-component ref
-		// without a per-frame heap allocation.
-		System.Span<float> components = stackalloc float[3];
-		components[0] = scale.X;
-		components[1] = scale.Y;
-		components[2] = scale.Z;
-		for (int i = 0; i < 3; i++)
+		if (facesAvailable)
 		{
-			uint axisId = GizmoContext.MakeHandleId(GizmoId, HandleAxisX + i);
-			GizmoBehavior.AxisScaleDraw(_context, draw, axisId, origin, axes[i], worldHeight, worldSize, axisColors[i]);
-			if (intersects)
+			// The six face spheres (milestone 2.7). Positions come from the live transform every
+			// frame, so they follow the visual faces of a rotated, non-uniformly scaled part. The
+			// Im3d "flip axes when viewing from behind" handling is deliberately NOT applied here:
+			// a sphere that teleported to the far side of the part when the camera crossed the
+			// horizon would be unusable, and the milestone pins that as a contract.
+			for (int face = 0; face < FaceScaleMath.FaceCount; face++)
 			{
-				ret |= GizmoBehavior.AxisScaleBehavior(_context, draw, axisId, origin, axes[i], _appData.SnapScale, worldHeight, worldSize, ref components[i]);
+				uint id = GizmoContext.MakeHandleId(GizmoId, FaceScaleMath.HandleId(face));
+				Vector3 centre = FaceScaleMath.WorldFaceCenter(face, meshMin, meshMax, target.GlobalTransform);
+				Vector3 normal = FaceScaleMath.WorldFaceNormal(face, target.GlobalTransform);
+				float handleRadius = _context.PixelsToWorldSize(centre, _context.GizmoSizePixels * 8.0f);
+
+				DrawFaceHandle(draw, id, centre, normal, face);
+
+				if (intersects)
+				{
+					int axis = FaceScaleMath.AxisForFace(face);
+					if (FaceScaleBehavior.Apply(_context, id, face, centre, normal, origin, handleRadius,
+						scale[axis], FaceScaleMath.MeshHalfAlongAxis(face, meshMin, meshMax),
+						_appData.SnapScale, ref _faceDrag, out float newComponent, out Vector3 newOrigin))
+					{
+						// Both values are absolute (measured from the press-time part), so they are
+						// assigned — adding them to the live values here is what made the part drift.
+						scale[axis] = newComponent;
+						position = newOrigin;
+						ret = true;
+					}
+				}
 			}
 		}
-		scale = new Vector3(components[0], components[1], components[2]);
+		else
+		{
+			// Axes. Im3d passes &(*outVec3)[i]; a stack Span gives the same single-component ref
+			// without a per-frame heap allocation.
+			System.Span<float> components = stackalloc float[3];
+			components[0] = scale.X;
+			components[1] = scale.Y;
+			components[2] = scale.Z;
+			for (int i = 0; i < 3; i++)
+			{
+				uint axisId = GizmoContext.MakeHandleId(GizmoId, HandleAxisX + i);
+				GizmoBehavior.AxisScaleDraw(_context, draw, axisId, origin, axes[i], worldHeight, worldSize, axisColors[i]);
+				if (intersects)
+				{
+					ret |= GizmoBehavior.AxisScaleBehavior(_context, draw, axisId, origin, axes[i], _appData.SnapScale, worldHeight, worldSize, ref components[i]);
+				}
+			}
+			scale = new Vector3(components[0], components[1], components[2]);
+		}
 
 		_context.EndGizmo();
 
@@ -582,6 +733,47 @@ public sealed class GizmoController
 		}
 
 		return ret;
+	}
+
+	/// <summary>
+	/// One face sphere (milestone 2.7): a screen-constant dot in the axis's colour, highlighted on
+	/// hot/active. A sphere whose face points straight at the viewer fades toward
+	/// <see cref="FaceHandleMinAlpha"/> rather than out — that keeps it from swallowing the centre
+	/// uniform dot when both project onto the same spot, while staying visible enough to grab.
+	/// </summary>
+	private void DrawFaceHandle(IGizmoDraw draw, uint id, Vector3 centre, Vector3 normal, int face)
+	{
+		Vector3 viewDir = _appData.ProjectionOrtho
+			? _appData.ViewDirection
+			: (_appData.ViewOrigin - centre).Normalized();
+		Color color = FaceHandleColor(face);
+
+		if (_context.IsActive(id) || _context.IsHot(id))
+		{
+			color = GizmoColors.Highlight;
+		}
+		else
+		{
+			float aligned = GizmoMath.Remap(1.0f - Mathf.Abs(normal.Dot(viewDir)), 0.05f, 0.1f);
+			color = GizmoBehavior.WithAlpha(color, Mathf.Max(FaceHandleMinAlpha, aligned));
+		}
+
+		draw.Dot(centre, _context.GizmoSizePixels * 4.0f, color);
+	}
+
+	/// <summary>Alpha floor for a face sphere facing the viewer; see <see cref="DrawFaceHandle"/>.</summary>
+	private const float FaceHandleMinAlpha = 0.2f;
+
+	/// <summary>The axis colour for a face's sphere: X red, Y green, Z blue — the same mapping the
+	/// axis handles use, so the six spheres read as three axis pairs.</summary>
+	private static Color FaceHandleColor(int face)
+	{
+		switch (FaceScaleMath.AxisForFace(face))
+		{
+			case 0: return GizmoColors.Red;
+			case 1: return GizmoColors.Green;
+			default: return GizmoColors.Blue;
+		}
 	}
 
 	/// <summary>Im3d::DrawCircle — im3d.cpp:224. A LineLoop ring in the plane with the given normal.</summary>
@@ -627,7 +819,12 @@ public sealed class GizmoController
 		{
 			return "none";
 		}
-		switch ((int)(id & 0xFF))
+		int index = (int)(id & 0xFF);
+		if (index >= FaceScaleMath.HandleBase && index < FaceScaleMath.HandleBase + FaceScaleMath.FaceCount)
+		{
+			return "face" + DecalMath.FaceNames[index - FaceScaleMath.HandleBase];
+		}
+		switch (index)
 		{
 			case HandleAxisX: return "axisX";
 			case HandleAxisY: return "axisY";

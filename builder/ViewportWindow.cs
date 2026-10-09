@@ -69,7 +69,7 @@ public class ViewportWindow : ICameraInputSource
 
 		bool open = fullscreen
 			? ImGui.Begin("##GameViewport", GameWindowFlags)
-			: ImGui.Begin("Viewport");
+			: ImGui.Begin("Viewport", EditorChrome.PanelWindowFlags);
 		if (!open)
 		{
 			ImGui.End();
@@ -162,6 +162,14 @@ public class ViewportWindow : ICameraInputSource
 			LotUiRenderer.DrawAll(_scene.LotUIRoot, _imageOrigin, _imageSize, builder.Selection);
 			builder.UiGizmo.Update(_imageOrigin, _imageSize);
 		}
+		else if (builder.ConstraintPick.IsArmed)
+		{
+			// The constraint tool owns the click while it is armed: no gizmo, no selection change,
+			// no part drag — just the pick the gesture asked for.
+			builder.Gizmo.Suspend();
+			HandleConstraintPick(builder, imageActive);
+			LotUiRenderer.DrawAll(_scene.LotUIRoot, _imageOrigin, _imageSize, builder.Selection);
+		}
 		else
 		{
 			builder.Gizmo.Update(_imageOrigin, _imageSize);
@@ -172,7 +180,10 @@ public class ViewportWindow : ICameraInputSource
 			// hovered or held it owns the click as well.
 			if (!builder.Gizmo.WantsMouse)
 			{
-				HandlePointerInput(builder, imageActive, builder.Toolbox.CurrentGizmoMode == GizmoMode.Select);
+				// One mode decision, two consumers: the part drag owns Select, the decal face tool
+				// owns Decal, and both read it here rather than re-deriving it later.
+				GizmoMode mode = builder.Toolbox.CurrentGizmoMode;
+				HandlePointerInput(builder, imageActive, mode == GizmoMode.Select, mode == GizmoMode.Decal);
 			}
 
 			// Lot UI elements render as a screen-space overlay clipped to this window.
@@ -195,11 +206,25 @@ public class ViewportWindow : ICameraInputSource
 	}
 
 	/// <summary>
+	/// Constraint-tool pointer handling: one queued click ray per left press while the tool is
+	/// armed. Like <see cref="HandlePointerInput"/> this only records intent here (the ImGui state
+	/// is valid in this pass); the raycast itself runs in the physics step.
+	/// </summary>
+	private void HandleConstraintPick(Builder builder, bool imageActive)
+	{
+		if (!ImGui.IsMouseClicked(ImGui.MouseButtonLeft) || !imageActive) return;
+		Vector2 mouse = ImGui.GetMousePos();
+		ViewportRay.FromScreen(_scene.Freecam, mouse, _imageOrigin, _imageSize, _scene.LotViewport.Size,
+			out Vector3 rayOrigin, out Vector3 rayDirection);
+		builder.ConstraintPick.QueueClick(rayOrigin, rayDirection);
+	}
+
+	/// <summary>
 	/// Viewport pointer handling. Only mouse intent is recorded here (the ImGui state is valid in
 	/// this layout pass); the pick and the collision-resolved move run in Builder._PhysicsProcess,
 	/// where Godot allows space-state queries and kinematic moves.
 	/// </summary>
-	private void HandlePointerInput(Builder builder, bool imageActive, bool allowDrag)
+	private void HandlePointerInput(Builder builder, bool imageActive, bool allowDrag, bool decalTool)
 	{
 		Vector2 mouse = ImGui.GetMousePos();
 		bool pressed = ImGui.IsMouseClicked(ImGui.MouseButtonLeft) && imageActive;
@@ -214,7 +239,7 @@ public class ViewportWindow : ICameraInputSource
 			if (pressed)
 			{
 				bool additive = Input.IsPhysicalKeyPressed(Key.Ctrl) || Input.IsPhysicalKeyPressed(Key.Shift);
-				builder.Parts.QueuePress(rayOrigin, rayDirection, additive, allowDrag);
+				builder.Parts.QueuePress(rayOrigin, rayDirection, additive, allowDrag, decalTool);
 			}
 			else
 			{

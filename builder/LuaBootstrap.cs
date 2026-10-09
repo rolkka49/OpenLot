@@ -464,11 +464,21 @@ local sandbox = {
         CallClient = function(handle, name, ...) return crossEntityCall(CallClient, handle, name, ...) end,
     }),
     log = function(message) return Lot.Log(tostring(message)) end,
+    -- print is Lua's own verb, rebuilt as a varargs alias of log (the native one is stripped from
+    -- the global env below). Arguments join with tabs, exactly like standard Lua print, so a
+    -- Roblox-style script that calls print(...) lands in the Output window unchanged.
+    print = function(...)
+        local count = select('#', ...)
+        local parts = {}
+        for i = 1, count do parts[i] = tostring((select(i, ...))) end
+        return Lot.Log(table_lib.concat(parts, '\t'))
+    end,
     -- Convenience wrappers matching the project's default script template; they only call Lot.*.
     cube = function(x, y, z) return Lot.SpawnCube(x or 0, y or 0, z or 0) end,
     sphere = function(x, y, z) return Lot.SpawnSphere(x or 0, y or 0, z or 0) end,
     cylinder = function(x, y, z) return Lot.SpawnCylinder(x or 0, y or 0, z or 0) end,
     capsule = function(x, y, z) return Lot.SpawnCapsule(x or 0, y or 0, z or 0) end,
+    decal = function(host) return Lot.SpawnDecal(host or 0) end,
 }
 __openlot_sandbox = sandbox
 

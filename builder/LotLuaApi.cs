@@ -41,7 +41,11 @@ public class LotLuaApi
 	/// </summary>
 	public int SpawnCapsule(float x, float y, float z) { return Spawn3D(LotObjectKind.Capsule, new Vector3(x, y, z)); }
 
-	/// <summary>Moves the object to (x, y, z), relative to the lot origin.</summary>
+	/// <summary>
+	/// Moves the object to (x, y, z), relative to the lot origin. Allowed on anchored parts too:
+	/// anchoring controls gravity, not who may write a transform (a script can reposition an
+	/// anchored part; it just will not fall afterwards).
+	/// </summary>
 	public void SetPosition(int handle, float x, float y, float z)
 	{
 		Node3D node = AsNode3D(handle, "SetPosition");
@@ -73,6 +77,512 @@ public class LotLuaApi
 	public float GetScaleX(int handle) { Node3D n = AsNode3D(handle, "GetScaleX"); return n != null ? n.Scale.X : 1f; }
 	public float GetScaleY(int handle) { Node3D n = AsNode3D(handle, "GetScaleY"); return n != null ? n.Scale.Y : 1f; }
 	public float GetScaleZ(int handle) { Node3D n = AsNode3D(handle, "GetScaleZ"); return n != null ? n.Scale.Z : 1f; }
+
+	// --- Part properties (milestone 2.3) ---
+	// Verb-first, primitives-only bindings for the properties the Inspector edits, so creator
+	// scripts read and write exactly the same state the editor shows (never a Godot object; a
+	// texture is addressed by its opaque asset id). Names are kept in step with the descriptor ids
+	// in LotPropertyRegistry, which is the single declaration table.
+
+	/// <summary>
+	/// Anchors or unanchors the part. Anchored parts stay in place; unanchored parts are affected
+	/// by gravity in a player session (the dynamic-body layer lands with §3.6). Both states still
+	/// accept transform writes from scripts — anchoring controls gravity, not who may move a part.
+	/// </summary>
+	public void SetAnchored(int handle, bool anchored)
+	{
+		LotObject part = AsPart(handle, "SetAnchored");
+		if (part != null) part.SetAnchored(anchored);
+	}
+
+	/// <summary>True while the part is anchored. False for a missing handle.</summary>
+	public bool IsAnchored(int handle)
+	{
+		LotObject part = AsPart(handle, "IsAnchored");
+		return part != null && part.Anchored;
+	}
+
+	/// <summary>
+	/// Sets whether the part blocks other objects. When off, solid things pass through it; the part
+	/// stays selectable and draggable in the editor.
+	/// </summary>
+	public void SetCanCollide(int handle, bool canCollide)
+	{
+		LotObject part = AsPart(handle, "SetCanCollide");
+		if (part != null) part.SetCanCollide(canCollide);
+	}
+
+	/// <summary>True while the part blocks other objects. False for a missing handle.</summary>
+	public bool GetCanCollide(int handle)
+	{
+		LotObject part = AsPart(handle, "GetCanCollide");
+		return part != null && part.CanCollide;
+	}
+
+	/// <summary>
+	/// Assigns the part's named collision group (milestone 3.5). Valid names are those on
+	/// <see cref="LotCollisionGroups.Names"/> ("Default", "Terrain", "Character", ...). An unknown
+	/// name is ignored (the part keeps its group), so a typo cannot silently drop it off the physics
+	/// layers. Which groups interact is set with <see cref="SetGroupsCollidable"/>, not here.
+	///
+	/// Side effect: the part's collision layer becomes the group's bit and its mask becomes the
+	/// group's row of the interaction matrix.
+	/// </summary>
+	public void SetCollisionGroup(int handle, string group)
+	{
+		LotObject part = AsPart(handle, "SetCollisionGroup");
+		if (part == null) return;
+		if (!LotCollisionGroups.IsKnown(group))
+		{
+			Warn("[LotLuaApi] SetCollisionGroup: unknown group '" + group + "'; the part stays '" +
+				part.CollisionGroup + "'");
+			return;
+		}
+		part.SetCollisionGroup(group);
+	}
+
+	/// <summary>The part's named collision group, or "" for a missing handle.</summary>
+	public string GetCollisionGroup(int handle)
+	{
+		LotObject part = AsPart(handle, "GetCollisionGroup");
+		return part != null ? part.CollisionGroup : "";
+	}
+
+	/// <summary>
+	/// Turns interaction between two named groups on or off, for the whole lot. Returns false when
+	/// either name is unknown, so a script can tell a typo from a success.
+	///
+	/// Authority (§1.3): this changes what collides for everyone, so it is host-authoritative —
+	/// over a network a client must send it through <c>net.server</c>, and only the host's copy is
+	/// trusted. In single-player and Test mode there is no peer, so it applies directly.
+	///
+	/// Side effect: every part's collision mask is recomputed (an O(parts) walk, not per-frame).
+	/// </summary>
+	public bool SetGroupsCollidable(string groupA, string groupB, bool collides)
+	{
+		if (!LotCollisionGroups.SetCollidesByName(groupA, groupB, collides)) return false;
+		if (_scene != null) _scene.RefreshCollision();
+		return true;
+	}
+
+	/// <summary>True when two named groups interact. False when either name is unknown.</summary>
+	public bool GetGroupsCollidable(string groupA, string groupB)
+	{
+		return LotCollisionGroups.GetCollidesByName(groupA, groupB);
+	}
+
+	// --- mechanical constraints (§3.6) -------------------------------------------------------------
+	//
+	// Welds and hinges are created/edited here exactly as the editor creates them; the records are
+	// the source of truth and the engine builds joints from them on session entry (and rebuilds on
+	// any change made while a session runs). Authority (§1.3): these mutate the lot, so over a
+	// network the host is the writer — send them through net.server, never trust a client's copy.
+
+	/// <summary>
+	/// Welds two parts: they keep the relative position/orientation they have right now and move as
+	/// one from then on. Returns the link's id, or -1 when a handle is not a part (or both handles
+	/// are the same part). Welding an already-welded pair returns the existing link rather than
+	/// stacking a second one.
+	///
+	/// Side effect: entering a player session rebuilds the lot's joints, so an unanchored pair
+	/// starts moving as one from the next session on (and immediately if one is already running).
+	/// </summary>
+	public int WeldParts(int handleA, int handleB)
+	{
+		LotObject partA = AsPart(handleA, "WeldParts");
+		LotObject partB = AsPart(handleB, "WeldParts");
+		if (partA == null || partB == null) return -1;
+		if (handleA == handleB)
+		{
+			Warn("[LotLuaApi] WeldParts: a part cannot be welded to itself");
+			return -1;
+		}
+
+		LotConstraintRecord existing = LotConstraints.FindWeld(handleA, handleB);
+		if (existing != null) return existing.Id;
+
+		LotConstraints.CanonicalPair(handleA, handleB, out int first, out int second);
+		LotConstraintRecord record = LotConstraints.Add(new LotConstraintRecord
+		{
+			Kind = LotConstraintKind.Weld,
+			A = first,
+			B = second
+		});
+		if (_scene != null) _scene.RebuildConstraints();
+		return record.Id;
+	}
+
+	/// <summary>Removes the weld between two parts (pair order does not matter). False when there is none.</summary>
+	public bool Unweld(int handleA, int handleB)
+	{
+		LotConstraintRecord record = LotConstraints.FindWeld(handleA, handleB);
+		if (record == null) return false;
+		LotConstraints.Remove(record.Id);
+		if (_scene != null) _scene.RebuildConstraints();
+		return true;
+	}
+
+	/// <summary>True when an enabled weld holds between the two parts.</summary>
+	public bool IsWelded(int handleA, int handleB)
+	{
+		return LotConstraints.IsWelded(handleA, handleB);
+	}
+
+	private static bool TryParseHingeAxis(string axis, out Vector3 parsed)
+	{
+		parsed = Vector3.Up;
+		string normalized = (axis ?? "").Trim().ToLowerInvariant();
+		if (normalized == "x") { parsed = Vector3.Right; return true; }
+		if (normalized == "y") { parsed = Vector3.Up; return true; }
+		if (normalized == "z") { parsed = Vector3.Back; return true; }
+		// The negative spellings come free with a free-direction axis, so they are accepted too.
+		if (normalized == "-x") { parsed = Vector3.Left; return true; }
+		if (normalized == "-y") { parsed = Vector3.Down; return true; }
+		if (normalized == "-z") { parsed = Vector3.Forward; return true; }
+		return false;
+	}
+
+	/// <summary>
+	/// Creates a hinge between two parts, or between a part and the world (-1 as the second side) —
+	/// the "door in an invisible wall" form. The pivot is a world-space point (usually where the
+	/// ray hit the first part); it is stored relative to that part, so moving the part carries the
+	/// hinge along. Returns the link's id, or -1 for a bad handle or an unknown axis.
+	///
+	/// Axis is "x", "y", "z" (or "-x"/"-y"/"-z") in the first part's frame. For any other direction
+	/// — an angled hinge — create it and aim it with <see cref="SetHingeAxis"/>, or use the editor's
+	/// sharp axis tools. The hinge starts free (no limits, no motor); shape it with
+	/// <see cref="SetHingeLimits"/> and <see cref="SetHingeMotor"/>.
+	/// </summary>
+	public int CreateHinge(int handleA, int handleB, string axis, float px, float py, float pz)
+	{
+		LotObject partA = AsPart(handleA, "CreateHinge");
+		if (partA == null) return -1;
+		if (handleB != LotConstraintRecord.WorldHandle)
+		{
+			LotObject partB = AsPart(handleB, "CreateHinge");
+			if (partB == null) return -1;
+			if (handleA == handleB)
+			{
+				Warn("[LotLuaApi] CreateHinge: a part cannot be hinged to itself");
+				return -1;
+			}
+		}
+
+		Vector3 parsed;
+		if (!TryParseHingeAxis(axis, out parsed))
+		{
+			Warn("[LotLuaApi] CreateHinge: unknown axis '" + axis + "' (use \"x\", \"y\" or \"z\")");
+			return -1;
+		}
+
+		LotConstraintRecord record = LotConstraints.Add(new LotConstraintRecord
+		{
+			Kind = LotConstraintKind.Hinge,
+			A = handleA,
+			B = handleB,
+			Axis = parsed,
+			Pivot = partA.GlobalTransform.AffineInverse() * new Vector3(px, py, pz)
+		});
+		if (_scene != null) _scene.RebuildConstraints();
+		return record.Id;
+	}
+
+	/// <summary>
+	/// Sets a hinge's angular limits in degrees (relative to the pose captured when the session
+	/// built the joint). Pass <paramref name="enabled"/> false for a free hinge. Lower/upper are
+	/// swapped when handed in reversed, so a limit can never be built inside-out. False for an
+	/// unknown id or a non-hinge link.
+	/// </summary>
+	public bool SetHingeLimits(int id, float lowerDeg, float upperDeg, bool enabled)
+	{
+		LotConstraintRecord record = LotConstraints.Find(id);
+		if (record == null || record.Kind != LotConstraintKind.Hinge) return false;
+		if (lowerDeg > upperDeg)
+		{
+			float swap = lowerDeg;
+			lowerDeg = upperDeg;
+			upperDeg = swap;
+		}
+		record.LowerDeg = lowerDeg;
+		record.UpperDeg = upperDeg;
+		record.LimitsEnabled = enabled;
+		if (_scene != null && _scene.ConstraintSession != null) _scene.ConstraintSession.ApplyHingeParams(id);
+		return true;
+	}
+
+	/// <summary>
+	/// Drives a hinge: mode "off" is a free hinge, "spin" turns it at
+	/// <paramref name="velocity"/> degrees/second with at most <paramref name="maxPush"/> impulse
+	/// (0 = unlimited, per Godot). Negative velocity reverses. False for an unknown id, a non-hinge
+	/// link, or an unknown mode — so a typo cannot silently stop a motor.
+	/// </summary>
+	public bool SetHingeMotor(int id, string mode, float velocity, float maxPush)
+	{
+		LotConstraintRecord record = LotConstraints.Find(id);
+		if (record == null || record.Kind != LotConstraintKind.Hinge) return false;
+
+		string normalized = (mode ?? "").Trim().ToLowerInvariant();
+		if (normalized == "off") record.Motor = HingeMotorMode.Off;
+		else if (normalized == "spin") record.Motor = HingeMotorMode.Spin;
+		else
+		{
+			Warn("[LotLuaApi] SetHingeMotor: unknown mode '" + mode + "' (use \"off\" or \"spin\")");
+			return false;
+		}
+		record.MotorVelocity = velocity;
+		record.MotorMaxPush = Mathf.Max(0f, maxPush);
+		if (_scene != null && _scene.ConstraintSession != null) _scene.ConstraintSession.ApplyHingeParams(id);
+		return true;
+	}
+
+	/// <summary>
+	/// Aims a hinge's axis at (x, y, z) in world space — any direction, which is the point of this
+	/// verb: the string form on <see cref="CreateHinge"/> only spells the six axis directions, and
+	/// an angled hinge needs this. The vector is normalized; a zero vector is refused (with a
+	/// warning) rather than guessed at. False for an unknown id or a non-hinge link. Rebuilds the
+	/// session's joints, so it applies live inside a running session too.
+	/// </summary>
+	public bool SetHingeAxis(int id, float x, float y, float z)
+	{
+		LotConstraintRecord record = LotConstraints.Find(id);
+		if (record == null || record.Kind != LotConstraintKind.Hinge) return false;
+
+		Vector3 axis;
+		if (!HingeAxisMath.TryNormalize(new Vector3(x, y, z), out axis))
+		{
+			Warn("[LotLuaApi] SetHingeAxis: the axis must be a non-zero direction");
+			return false;
+		}
+		record.Axis = axis;
+		if (_scene != null) _scene.RebuildConstraints();
+		return true;
+	}
+
+	/// <summary>Removes any constraint (weld or hinge) by id. False for an unknown id.</summary>
+	public bool RemoveConstraint(int id)
+	{
+		if (!LotConstraints.Remove(id)) return false;
+		if (_scene != null) _scene.RebuildConstraints();
+		return true;
+	}
+
+	/// <summary>
+	/// Applies a texture by asset id ("" clears it). Returns true when the id was applied, false
+	/// when it is unknown — so a script can tell a typo from a success. Asset ids are opaque; get
+	/// one from the Inspector's Texture dropdown or from <see cref="GetTexture"/>.
+	/// </summary>
+	public bool SetTexture(int handle, string assetId)
+	{
+		LotObject part = AsPart(handle, "SetTexture");
+		if (part == null) return false;
+		return part.SetTexture(assetId);
+	}
+
+	/// <summary>The part's texture asset id, or "" when it has none.</summary>
+	public string GetTexture(int handle)
+	{
+		LotObject part = AsPart(handle, "GetTexture");
+		return part != null ? part.TextureId : "";
+	}
+
+	// --- Decals (milestone 2.6) ---
+	// A decal is an image patch on ONE face of a part. It is spawned into a host part and stays
+	// parented to it, so the image follows the part. Every value is a primitive (a face name and an
+	// opaque asset id), every write goes through the part's own clamping methods, and the same
+	// state is what the Inspector's Decal section edits.
+
+	/// <summary>
+	/// Spawns an image decal on the part with the given handle, parented to it. Returns the decal's
+	/// handle, or -1 when the handle is not a part (a decal cannot host another decal). The new
+	/// decal starts as a plain white half-size square on the part's +Z (front) face until an image
+	/// is set with <see cref="SetDecalTexture"/>.
+	/// </summary>
+	public int SpawnDecal(int hostHandle)
+	{
+		if (_scene == null) return -1;
+		LotObject host = AsPart(hostHandle, "SpawnDecal");
+		if (host == null) return -1;
+		if (host.Kind == LotObjectKind.Decal)
+		{
+			Warn("[LotLuaApi] SpawnDecal: a decal cannot host another decal");
+			return -1;
+		}
+
+		LotObject decal = _scene.SpawnDecal(host);
+		int handle = _scene.RegisterHandle(decal);
+		TagLoadTimeSpawn(decal);
+		return handle;
+	}
+
+	/// <summary>
+	/// Moves the decal to another face of its host: one of "+Z", "-Z", "+X", "-X", "+Y", "-Y" (the
+	/// Inspector's Face list). Returns false for a bad handle or an unknown face name, so a script
+	/// can tell a typo from a success.
+	/// </summary>
+	public bool SetDecalFace(int handle, string face)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalFace");
+		if (decal == null) return false;
+		return decal.SetDecalFace(DecalMath.FaceIndex(face));
+	}
+
+	/// <summary>The decal's current face name ("+Z" .. "-Y"), or "" for a bad handle.</summary>
+	public string GetDecalFace(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalFace");
+		return decal != null ? DecalMath.FaceNames[decal.DecalFace] : "";
+	}
+
+	/// <summary>
+	/// Sets the decal's image by asset id ("" clears it back to a plain square). Returns false when
+	/// the id is unknown — the same contract as <see cref="SetTexture"/>. The image's transparent
+	/// areas stay transparent on the part.
+	/// </summary>
+	public bool SetDecalTexture(int handle, string assetId)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalTexture");
+		return decal != null && decal.SetTexture(assetId);
+	}
+
+	/// <summary>The decal's image asset id, or "" when it has none.</summary>
+	public string GetDecalTexture(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalTexture");
+		return decal != null ? decal.TextureId : "";
+	}
+
+	/// <summary>
+	/// Slides the image across its face, in fractions of the face: u is horizontal, v vertical
+	/// (-0.5 .. 0.5). Both values are clamped so the image stays entirely on the face.
+	/// </summary>
+	public void SetDecalOffset(int handle, float u, float v)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalOffset");
+		if (decal == null) return;
+		decal.SetDecalOffsetU(u);
+		decal.SetDecalOffsetV(v);
+	}
+
+	/// <summary>Horizontal slide of the image (-0.5 .. 0.5 of the face width). 0 for a bad handle.</summary>
+	public float GetDecalOffsetU(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalOffsetU");
+		return decal != null ? decal.DecalOffsetU : 0f;
+	}
+
+	/// <summary>Vertical slide of the image (-0.5 .. 0.5 of the face height). 0 for a bad handle.</summary>
+	public float GetDecalOffsetV(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalOffsetV");
+		return decal != null ? decal.DecalOffsetV : 0f;
+	}
+
+	/// <summary>
+	/// Sizes the image as a fraction of its face (0.05 .. 1); the offset is re-clamped because a
+	/// bigger image has less room to move. Returns silently for a bad handle.
+	/// </summary>
+	public void SetDecalScale(int handle, float u, float v)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalScale");
+		if (decal == null) return;
+		decal.SetDecalScaleU(u);
+		decal.SetDecalScaleV(v);
+	}
+
+	/// <summary>Image width as a fraction of the face width (0.05 .. 1). 0 for a bad handle.</summary>
+	public float GetDecalScaleU(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalScaleU");
+		return decal != null ? decal.DecalScaleU : 0f;
+	}
+
+	/// <summary>Image height as a fraction of the face height (0.05 .. 1). 0 for a bad handle.</summary>
+	public float GetDecalScaleV(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalScaleV");
+		return decal != null ? decal.DecalScaleV : 0f;
+	}
+
+	/// <summary>
+	/// Sets how solid the decal's image is (0 invisible .. 1 opaque, clamped). Transparent pixels
+	/// of the image stay transparent at any opacity, so this fades the whole patch.
+	/// </summary>
+	public void SetDecalOpacity(int handle, float opacity)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalOpacity");
+		if (decal != null) decal.SetDecalOpacity(opacity);
+	}
+
+	/// <summary>The decal's opacity (0 .. 1). 0 for a bad handle.</summary>
+	public float GetDecalOpacity(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalOpacity");
+		return decal != null ? decal.DecalOpacity : 0f;
+	}
+
+	// --- Decal panel content (on-face UI) ---
+
+	/// <summary>
+	/// Switches what the panel draws: "Image", "Text", "Button" or "Scrollbar". False for a bad
+	/// handle or an unknown name. Button and Scrollbar are drawn and configurable; their click
+	/// handling waits on the event system (§3.7).
+	/// </summary>
+	public bool SetDecalContent(int handle, string content)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalContent");
+		if (decal == null) return false;
+		return decal.SetDecalContent(DecalMath.ContentIndex(content));
+	}
+
+	/// <summary>The panel's content name, or "" for a bad handle.</summary>
+	public string GetDecalContent(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalContent");
+		return decal != null ? DecalMath.ContentNames[(int)decal.Content] : "";
+	}
+
+	/// <summary>Sets the text a Text or Button panel shows (wraps at the panel's edge).</summary>
+	public void SetDecalText(int handle, string text)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalText");
+		if (decal != null) decal.SetDecalText(text);
+	}
+
+	/// <summary>The panel's text, or "" when it has none (or for a bad handle).</summary>
+	public string GetDecalText(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalText");
+		return decal != null ? decal.DecalText : "";
+	}
+
+	/// <summary>Sets the scrollbar thumb position, 0 (top) .. 1 (bottom), clamped.</summary>
+	public void SetDecalScroll(int handle, float value)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalScroll");
+		if (decal != null) decal.SetDecalScroll(value);
+	}
+
+	/// <summary>The scrollbar thumb position (0 .. 1). 0 for a bad handle.</summary>
+	public float GetDecalScroll(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalScroll");
+		return decal != null ? decal.DecalScroll : 0f;
+	}
+
+	/// <summary>Sets the label font size (8 .. 160), clamped. One line takes FontSize/160 of the
+	/// panel's height, so the text scales with the panel and with the part.</summary>
+	public void SetDecalFontSize(int handle, float size)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalFontSize");
+		if (decal != null) decal.SetDecalFontSize(size);
+	}
+
+	/// <summary>The label font size (8 .. 160). 0 for a bad handle.</summary>
+	public float GetDecalFontSize(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalFontSize");
+		return decal != null ? decal.DecalFontSize : 0f;
+	}
 
 	/// <summary>Sets the mesh color (0..1 floats). Only applies to 3D parts.</summary>
 	public void SetColor(int handle, float r, float g, float b)
@@ -112,11 +622,10 @@ public class LotLuaApi
 	public void DestroyObject(int handle)
 	{
 		Node node = Resolve(handle, "DestroyObject");
-		if (node != null)
-		{
-			node.QueueFree();
-			_scene.ForgetHandle(handle);
-		}
+		if (node == null) return;
+		// The single destroy path: it forgets the handle, drops the entity's net bookkeeping and
+		// releases the part's texture reference, all of which a bare QueueFree would leave behind.
+		_scene.DestroyEntity(node);
 	}
 
 	// --- UI elements ---
@@ -168,9 +677,14 @@ public class LotLuaApi
 		}
 	}
 
-	/// <summary>Prints a message to the engine console (creator-side logging).</summary>
+	/// <summary>
+	/// Prints a message to the Output window and the engine console — the destination of a script's
+	/// <c>log(...)</c> and <c>print(...)</c>. Creator-side logging, so it is an Info entry, not a
+	/// warning.
+	/// </summary>
 	public void Log(string message)
 	{
+		LotLog.Info("log", message);
 		GD.Print("[Lot] " + message);
 	}
 
@@ -215,7 +729,7 @@ public class LotLuaApi
 	{
 		if (Net == null)
 		{
-			GD.PushWarning("[LotLuaApi] net bridge is not ready; dropped cross-entity call " + name);
+			Warn("[LotLuaApi] net bridge is not ready; dropped cross-entity call " + name);
 			if (args != null) args.Dispose();
 			return;
 		}
@@ -228,7 +742,7 @@ public class LotLuaApi
 	{
 		if (Net == null)
 		{
-			GD.PushWarning("[LotLuaApi] net bridge is not ready; dropped net." + direction + "." + name);
+			Warn("[LotLuaApi] net bridge is not ready; dropped net." + direction + "." + name);
 			if (args != null) args.Dispose();
 			return;
 		}
@@ -281,7 +795,7 @@ public class LotLuaApi
 	private Node Resolve(int handle, string api)
 	{
 		Node node = _scene != null ? _scene.GetByHandle(handle) : null;
-		if (node == null) GD.PushWarning("[LotLuaApi] " + api + ": no lot object for handle " + handle);
+		if (node == null) Warn("[LotLuaApi] " + api + ": no lot object for handle " + handle);
 		return node;
 	}
 
@@ -290,13 +804,49 @@ public class LotLuaApi
 		return Resolve(handle, api) as Node3D;
 	}
 
+	/// <summary>Resolves a handle to a 3D part, or null with a warning when it is not one.</summary>
+	private LotObject AsPart(int handle, string api)
+	{
+		Node node = Resolve(handle, api);
+		if (node == null) return null;
+		LotObject part = node as LotObject;
+		if (part == null) Warn("[LotLuaApi] " + api + ": handle " + handle + " is not a 3D part");
+		return part;
+	}
+
+	/// <summary>Resolves a handle to a decal, or null with a warning when it is not one — so a script
+	/// pointing a decal verb at a part is told why nothing happened.</summary>
+	private LotObject AsDecal(int handle, string api)
+	{
+		Node node = Resolve(handle, api);
+		if (node == null) return null;
+		LotObject lot = node as LotObject;
+		if (lot == null || lot.Kind != LotObjectKind.Decal)
+		{
+			Warn("[LotLuaApi] " + api + ": handle " + handle + " is not a decal");
+			return null;
+		}
+		return lot;
+	}
+
 	private LotUIElement AsUiElement(int handle, string api)
 	{
 		return Resolve(handle, api) as LotUIElement;
 	}
 
+	/// <summary>
+	/// Reports a creator-facing misuse to the Output window and the engine console in one step.
+	/// Every warning in this file goes through here, so the window sees them without a second call
+	/// site per message; the engine line stays for headless runs.
+	/// </summary>
+	private static void Warn(string message)
+	{
+		LotLog.Warn("lua", message);
+		GD.PushWarning(message);
+	}
+
 	private void WarnMissing(int handle, string api)
 	{
-		GD.PushWarning("[LotLuaApi] " + api + ": no lot object for handle " + handle);
+		Warn("[LotLuaApi] " + api + ": no lot object for handle " + handle);
 	}
 }

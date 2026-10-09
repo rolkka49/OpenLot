@@ -7,7 +7,12 @@ using Godot;
 /// </summary>
 public class ScriptManager
 {
-	private const string ScriptsDir = "user://Scripts";
+	/// <summary>
+	/// Where creator scripts live on disk. Public because the archive load path writes a lot's scripts
+	/// back here so the script runtime — which reads from disk — finds them; keeping the one declaration
+	/// means the loader cannot write to a different directory than the one the editor reads.
+	/// </summary>
+	public const string ScriptsDir = "user://Scripts";
 
 	private readonly Builder _builder;
 
@@ -91,28 +96,44 @@ public class ScriptManager
 		return true;
 	}
 
-	/// <summary>Renames the script's file and updates its hierarchy placeholder + open editor.</summary>
+	/// <summary>
+	/// Renames the script's file and updates its hierarchy placeholder + open editor. Recorded as one
+	/// history entry, so undo renames the file back (milestone 2.4).
+	/// </summary>
 	public void RenameScriptFile(LotScriptNode script, string newBaseName)
 	{
 		if (script == null || string.IsNullOrWhiteSpace(newBaseName)) return;
+		if (!GodotObject.IsInstanceValid(script)) return;
 		newBaseName = SanitizeFileName(newBaseName.Trim());
 
 		string oldPath = script.ScriptPath;
 		string newPath = ScriptsDir + "/" + newBaseName + ".lua";
-		if (oldPath != newPath && Godot.FileAccess.FileExists(oldPath))
+		if (oldPath == newPath) return;
+		string oldDisplay = script.DisplayName;
+		string newDisplay = newBaseName + ".lua";
+
+		_builder.History.Push(new DelegateCommand("Rename Script",
+			b => ApplyRename(script, oldPath, newPath, newDisplay),
+			b => ApplyRename(script, newPath, oldPath, oldDisplay)));
+	}
+
+	/// <summary>Renames the file on disk (when present) and points the placeholder at the result.</summary>
+	private void ApplyRename(LotScriptNode script, string fromPath, string toPath, string displayName)
+	{
+		if (!GodotObject.IsInstanceValid(script)) return;
+		if (fromPath != toPath && Godot.FileAccess.FileExists(fromPath))
 		{
-			Error error = Godot.DirAccess.RenameAbsolute(oldPath, newPath);
+			Error error = Godot.DirAccess.RenameAbsolute(fromPath, toPath);
 			if (error != Error.Ok)
 			{
-				GD.PushError("[ScriptManager] Failed to rename " + oldPath + ": " + error);
+				GD.PushError("[ScriptManager] Failed to rename " + fromPath + ": " + error);
 				return;
 			}
 		}
 
-		script.ScriptPath = newPath;
-		script.DisplayName = newBaseName + ".lua";
-		_builder.OnScriptRenamed(oldPath, newPath);
-		_builder.MarkDirty();
+		script.ScriptPath = toPath;
+		script.DisplayName = displayName;
+		_builder.OnScriptRenamed(fromPath, toPath);
 	}
 
 	private static void EnsureDirectory()

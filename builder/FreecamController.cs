@@ -1,9 +1,9 @@
 using Godot;
 
 /// <summary>
-/// Build-mode fly camera, ported from Unity's FreecamController: WASD + Space/Ctrl to fly,
-/// Shift to sprint, right-drag to look. All input is gated on the Viewport ImGui window having
-/// focus (the builder focus rule: click back into the viewport to regain camera control).
+/// Build-mode fly camera, ported from Unity's FreecamController: WASD + Space to fly, Shift to
+/// sprint, right-drag to look. All input is gated on the Viewport ImGui window having focus (the
+/// builder focus rule: click back into the viewport to regain camera control).
 /// Look deltas are gathered during the ImGui layout pass (ViewportWindow) and consumed here,
 /// because the ImGui wrapper state is only valid inside the layout callback.
 ///
@@ -54,7 +54,6 @@ public partial class FreecamController : Camera3D
 		if (Input.IsPhysicalKeyPressed(Key.D)) move += basis.X;
 		if (Input.IsPhysicalKeyPressed(Key.A)) move += -basis.X;
 		if (Input.IsPhysicalKeyPressed(Key.Space)) move += Vector3.Up;
-		if (Input.IsPhysicalKeyPressed(Key.Ctrl)) move += Vector3.Down;
 
 		if (move == Vector3.Zero) return;
 

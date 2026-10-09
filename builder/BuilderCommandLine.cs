@@ -29,7 +29,7 @@ public class BuilderCommandLine
 		ImGui.SetNextWindowPos(0f, displaySize.Y - BarHeight, ImGui.CondAlways);
 		ImGui.SetNextWindowSize(displaySize.X, BarHeight, ImGui.CondAlways);
 		int flags = ImGui.WindowNoTitleBar | ImGui.WindowNoResize | ImGui.WindowNoMove | ImGui.WindowNoScrollbar
-			| ImGui.WindowNoSavedSettings | ImGui.WindowNoFocusOnAppearing | ImGui.WindowNoDocking;
+			| ImGui.WindowNoSavedSettings | ImGui.WindowNoFocusOnAppearing | ImGui.WindowNoDocking | ImGui.WindowNoCollapse;
 
 		bool open = ImGui.Begin("##CommandBar", flags);
 		if (!open)
@@ -70,7 +70,9 @@ public class BuilderCommandLine
 		}
 		else
 		{
-			// Keep the one-line status readable: Lua errors carry full stack traces.
+			// Keep the one-line status readable: Lua errors carry full stack traces. The Output
+			// window keeps the whole trace; the strip only flashes the first line.
+			LotLog.Error("lua", LuaManager.Instance.LastError);
 			int lineEnd = LuaManager.Instance.LastError.IndexOf('\n');
 			string firstLine = lineEnd > 0 ? LuaManager.Instance.LastError.Substring(0, lineEnd) : LuaManager.Instance.LastError;
 			_statusText = "[Lua error] " + firstLine;

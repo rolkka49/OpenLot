@@ -668,9 +668,11 @@ public static class NetIntegrationTest
 			!LuaManager.Instance.RunString("while true do end", "__selftest_scratch_limit"));
 		Check("scratch runtime still usable after the trip",
 			LuaManager.Instance.RunString("scratch_after = 1", "scratchtest3"));
-		// One global at a time so a failure names the offender.
+		// One global at a time so a failure names the offender. print is not in the list: milestone
+		// 2.8 reinstates it as a varargs alias of log, so it is safe by construction and its output
+		// belongs in the Output window.
 		string[] dangerous = { "io", "os", "require", "dofile", "loadfile", "package", "debug", "load",
-			"collectgarbage", "coroutine", "rawset", "print", "luanet" };
+			"collectgarbage", "coroutine", "rawset", "luanet" };
 		List<string> leaks = new List<string>();
 		for (int i = 0; i < dangerous.Length; i++)
 		{
@@ -680,6 +682,10 @@ public static class NetIntegrationTest
 		}
 		Check("scratch env hides dangerous globals (leaks: " + (leaks.Count == 0 ? "none" : string.Join(",", leaks)) + ")",
 			leaks.Count == 0);
+		Check("scratch env exposes print as the log alias",
+			LuaManager.Instance.RunString(
+				"if type(print) ~= 'function' then error('missing') end\nprint('scratch print works')",
+				"scratchprint"));
 	}
 
 	private static void TestLiveGetHandleWiring(BuilderScene scene)

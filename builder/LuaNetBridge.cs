@@ -502,6 +502,10 @@ public sealed class LuaNetBridge : IDispatchTarget
 
 	private void Warn(string message)
 	{
+		// The one place router warnings pass through, so the Output window sees them without a
+		// second call site per message. The assigned callback keeps its Godot-console line for
+		// headless runs.
+		LotLog.Warn("net", message);
 		Action<string> warning = Warning;
 		if (warning != null) warning(message);
 	}

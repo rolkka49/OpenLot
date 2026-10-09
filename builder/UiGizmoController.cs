@@ -214,10 +214,34 @@ public sealed class UiGizmoController
 		{
 			_dragElement.Position = pos;
 			_dragElement.Size = size;
-			_builder.MarkDirty();
 		}
 
-		if (ImGui.IsMouseReleased(ImGui.MouseButtonLeft)) CancelDrag();
+		if (ImGui.IsMouseReleased(ImGui.MouseButtonLeft))
+		{
+			CommitDrag();
+			CancelDrag();
+		}
+	}
+
+	/// <summary>
+	/// Records the finished UI drag as one history entry. Called only on mouse release, so a drag
+	/// cancelled by a selection/mode change is not recorded.
+	/// </summary>
+	private void CommitDrag()
+	{
+		LotUIElement element = _dragElement;
+		if (!_dragging || element == null || !GodotObject.IsInstanceValid(element)) return;
+
+		Vector2 startPos = _dragStartPos;
+		Vector2 startSize = _dragStartSize;
+		Vector2 endPos = element.Position;
+		Vector2 endSize = element.Size;
+		if (startPos == endPos && startSize == endSize) return;
+
+		string label = _dragHandle < 0 ? "Move UI" : "Resize UI";
+		_builder.History.Push(new DelegateCommand(label,
+			b => { if (GodotObject.IsInstanceValid(element)) { element.Position = endPos; element.Size = endSize; } },
+			b => { if (GodotObject.IsInstanceValid(element)) { element.Position = startPos; element.Size = startSize; } }));
 	}
 
 	/// <summary>Body drag: offset from the start rect, clamped into the frame, then snapped.</summary>

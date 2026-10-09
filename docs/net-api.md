@@ -142,6 +142,9 @@ net.server.Foo = function(n)
 end
 ```
 
+`print` works too and is the same call: it joins its arguments with tabs, exactly like standard Lua
+`print`, so `print("x", 1)` shows `x    1` in the Output window.
+
 Comparisons and arithmetic behave normally. Precision is exact up to 2^53. `±math.huge` is allowed;
 `NaN` is rejected (it is almost always a bug, and NaN ≠ NaN breaks reasoning).
 
@@ -208,3 +211,100 @@ if they matter.
 skipped until you edit the file or reload the lot), and repeated out-of-memory rebuilds *suspend
 scripting* for the session — the Viewport window then shows a red **SCRIPTING SUSPENDED** banner with
 the reason, and scripts stay disabled until the lot is reloaded.
+
+## 11. Part properties (`Lot.*`, milestone 2.3)
+
+The Inspector edits these; the same state is readable and writable from a script. Everything is
+addressed by the object's handle, so nothing Godot-side ever reaches your code.
+
+```lua
+Lot.SetAnchored(handle, false)   -- unanchored: affected by gravity in a player session
+Lot.SetCanCollide(handle, false) -- solid things pass through it
+Lot.SetTexture(handle, assetId)  -- apply an image by asset id
+Lot.SetCollisionGroup(handle, "Terrain")
+```
+
+| Call | What it does |
+|---|---|
+| `Lot.SetAnchored(handle, bool)` | Anchored parts stay in place; unanchored parts are affected by gravity in a player session. |
+| `Lot.IsAnchored(handle)` | Returns whether the part is anchored. |
+| `Lot.SetCanCollide(handle, bool)` | When off, solid things pass through the part. It stays selectable and draggable in the editor. |
+| `Lot.GetCanCollide(handle)` | Returns whether the part blocks other objects. |
+| `Lot.SetTexture(handle, assetId)` | Applies an image; returns `true` on success and `false` for an unknown id. `""` clears it. |
+| `Lot.GetTexture(handle)` | Returns the part's texture asset id, or `""`. |
+| `Lot.SetCollisionGroup(handle, group)` | Puts the part in a named collision group (milestone 3.5). An unknown name is ignored (with a warning), so a typo cannot drop the part off the physics layers. |
+| `Lot.GetCollisionGroup(handle)` | Returns the part's group name, or `""`. |
+| `Lot.SetGroupsCollidable(a, b, bool)` | Turns interaction between two groups on or off for the whole lot; returns `false` for an unknown name. Host-authoritative (§1.3): over a network send it through `net.server`. |
+| `Lot.GetGroupsCollidable(a, b)` | Returns whether two groups interact; `false` for an unknown name. |
+
+Notes:
+
+* **Anchoring is about gravity, not who may move a part.** `SetPosition`/`SetRotationDeg` still work
+  on an anchored part — it simply will not fall afterwards.
+* **Asset ids are opaque.** Do not parse them. Read one from `Lot.GetTexture`, or pick one from the
+  Inspector's Texture dropdown; `"Import..."` there loads a new file.
+* **Supported images:** PNG, JPEG, WebP, BMP and TGA. The format is detected from the file's content,
+  not its name, so an image saved under the wrong extension still loads.
+* **Gravity applies in a player session.** Unanchored parts become simulated bodies when Test/Game
+  mode starts, so they fall, collide and follow their welds and hinges; in the creation environment
+  (Build mode) both states stay put so the part remains editable. A part's body form is fixed for a
+  session — changing `Anchored` while a session runs applies when the session next starts.
+* **Collision groups name a vocabulary, the matrix decides its meaning.** The groups are `Default`,
+  `Terrain`, `Character`, `Prop`, `Decoration`, `Trigger`, `Projectile` and `Effect`; which of them
+  interact is the lot-wide matrix edited under **View -> Collision Groups** (or with
+  `SetGroupsCollidable`). By default everything collides, so a lot that never touches groups is
+  unchanged. `CanCollide = false` still wins over the group — that part passes through everything.
+* Every one of these verbs becomes available to scripts automatically once declared in
+  `LotPropertyRegistry`/`LotLuaApi`; the registry is the single place a property is defined.
+
+## 12. Welds and hinges (`Lot.*`, milestone 3.6)
+
+Two links between parts, in the Roblox mental model — a weld holds two parts in their current
+relative pose, a hinge lets them rotate around one axis — with no attachments to manage: the weld
+takes the pose the parts already have, and a hinge's pivot is a point you pass in (usually where you
+clicked the part).
+
+```lua
+local id = Lot.WeldParts(partA, partB)                  -- move as one from now on
+Lot.SetAnchored(partA, true)                            -- one anchored side freezes the island
+local hinge = Lot.CreateHinge(partB, -1, "y", x, y, z)  -- hinge to the world at a pivot point
+Lot.SetHingeLimits(hinge, -90, 90, true)                -- a door that stops at 90 degrees
+Lot.SetHingeMotor(hinge, "spin", 45, 10)                -- drive it at 45 deg/s, at most 10 impulse
+```
+
+| Call | What it does |
+|---|---|
+| `Lot.WeldParts(handleA, handleB)` | Welds two parts: they keep the relative position/orientation they have right now and move as one. Returns the link's id, or `-1` for a bad handle. Welding an already-welded pair returns the existing link. |
+| `Lot.Unweld(handleA, handleB)` | Removes the weld between two parts (order does not matter). `false` when there is none. |
+| `Lot.IsWelded(handleA, handleB)` | Whether an enabled weld holds between them. |
+| `Lot.CreateHinge(handleA, handleB, axis, px, py, pz)` | Hinges two parts, or a part to the world (`-1` as the second side), around the world point `(px, py, pz)`. `axis` is `"x"`, `"y"`, `"z"` or their negatives (`"-x"` etc.) in the first part's frame; for any other direction use `Lot.SetHingeAxis`. Returns the link's id, or `-1` for a bad handle or unknown axis. |
+| `Lot.SetHingeLimits(id, lowerDeg, upperDeg, enabled)` | Angular limits in degrees, relative to the pose the hinge was built at. Reversed values are swapped. `false` for a non-hinge id. |
+| `Lot.SetHingeMotor(id, mode, velocity, maxPush)` | `"off"` (free hinge) or `"spin"` (turn at `velocity` degrees/second, capped by `maxPush`; `0` = unlimited, negative reverses). `false` for an unknown mode or a non-hinge id. |
+| `Lot.SetHingeAxis(id, x, y, z)` | Aims a hinge's axis at a world-space direction — any direction, for an angled hinge. The vector is normalized; a zero vector is refused. `false` for a non-hinge id. |
+| `Lot.RemoveConstraint(id)` | Removes a weld or a hinge by id. |
+
+Notes:
+
+* **Anchoring is the switch that freezes a link's island.** One anchored part in a welded group
+  freezes the whole group; anchoring *both* sides of a weld deactivates that weld (the parts stay
+  put, and the Inspector says why) — the Roblox rule, adopted deliberately.
+* **A hinge needs one movable side**: part-to-world, or part-to-part where at least one side is
+  unanchored. Both sides anchored means nothing to rotate, so the link reports inactive.
+* **Changes apply live.** Editing a weld or hinge while a session runs updates the physics
+  immediately; outside a session the change applies when the next session starts.
+* **The editor does the same thing**: the Toolbox's **Weld** button is two clicks (part, part).
+  **Hinge** is three steps — click the first part, click the second part (or empty space for the
+  world), then a green hinge-point marker with its axis rod appears: click to move it, then press
+  **Confirm** (or **Cancel**) in the Toolbox. A fresh hinge gets a horizontal axis so a hanging
+  part swings under gravity; rotate it with the sharp axis buttons — **Vertical**, **Horizontal**,
+  **Tilt 45**, **Yaw 45** — during placement and in the Inspector (each press is one undo step).
+  A selected part's hinges also show their ball-and-rod in the view outside a session, so the
+  orientation is visible as you change it. Welds and hinges are listed in the
+  **Scene Hierarchy** under `Links (n)` — click a row to select its first part, right-click to
+  select both parts, disable/enable or remove the link. The servo/angle motor mode reports an error
+  until the timing system (§3.8) can drive it.
+* **Over a network these are host-authoritative** (§1.3): send them through `net.server`.
+* Welds and hinges are saved in the lot file, so a lot reopens with its links intact.
+* **Test mode is an instance of the lot**: entering it snapshots the world, and leaving restores it
+  — parts a session moved, spawns a script made and links the session changed all stay in the
+  session. A part a session script *destroyed* is the one thing that does not come back.

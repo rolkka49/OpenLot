@@ -51,7 +51,17 @@ public partial class Terminal : Node2D
 	{
 		registry = new CommandRegistry(this);
 
-		// Subscribe to Shatadev's ImGui layout event
+		// Pin the content-scale mode before the first layout, so the whole ImGui overlay renders
+		// 1:1 at true window pixels and never scales/blurs with the window (see DisplaySetup).
+		DisplaySetup.NormalizeStretch();
+
+		// Restore the remembered wallpaper before the first layout draws. Idempotent, so entering
+		// the creation environment later will not re-run it.
+		WallpaperService.LoadPersistedSettings();
+
+		// Subscribe to Shatadev's ImGui layout event. The overlay renders 1:1 over the window
+		// because the content-scale stretch is disabled (see DisplaySetup); layout coordinates are
+		// therefore true window pixels and ImGui never scales with the window.
 		ImGui.OnLayout(OnLayout);
 
 		LogLine("Welcome to OpenLot v0.0.1");
@@ -135,7 +145,9 @@ public partial class Terminal : Node2D
 
 	private void OnLayout()
 	{
-		ImGui.DockspaceOverMainViewport();
+		// Draws the wallpaper (when one is set) and then the dockspace. With no wallpaper this is
+		// exactly the previous DockspaceOverMainViewport() call, so the default look is unchanged.
+		WallpaperService.DrawBackgroundAndDockspace();
 
 		switch (currentState)
 		{
@@ -162,7 +174,7 @@ public partial class Terminal : Node2D
 		// ImGui requires a matching End() for every Begin(), even when Begin()
 		// returns false (collapsed or docked-away window). Skipping it corrupts
 		// the native window stack and trips an ImGui assert -> hard crash.
-		bool open = ImGui.Begin("OpenLot");
+		bool open = ImGui.Begin("OpenLot", EditorChrome.PanelWindowFlags);
 		if (!open)
 		{
 			ImGui.End();
@@ -198,7 +210,7 @@ public partial class Terminal : Node2D
 	{
 		ImGui.SetNextWindowSize(700, 450, ImGui.CondFirstUseEver);
 
-		bool open = ImGui.Begin("Terminal Console");
+		bool open = ImGui.Begin("Terminal Console", EditorChrome.PanelWindowFlags);
 		if (!open)
 		{
 			ImGui.End();
@@ -275,7 +287,7 @@ public partial class Terminal : Node2D
 	{
 		ImGui.SetNextWindowSize(500, 300, ImGui.CondFirstUseEver);
 
-		bool open = ImGui.Begin("Active OpenLot Server List");
+		bool open = ImGui.Begin("Active OpenLot Server List", EditorChrome.PanelWindowFlags);
 		if (!open)
 		{
 			ImGui.End();
@@ -301,7 +313,7 @@ public partial class Terminal : Node2D
 	{
 		ImGui.SetNextWindowSize(400, 200, ImGui.CondFirstUseEver);
 
-		bool open = ImGui.Begin("Settings");
+		bool open = ImGui.Begin("Settings", EditorChrome.PanelWindowFlags);
 		if (!open)
 		{
 			ImGui.End();
@@ -386,6 +398,14 @@ public partial class Terminal : Node2D
 		// Enter the build-mode scene (same flow as the Unity build: terminal scene → builder scene).
 		GetTree().ChangeSceneToFile("res://builder/builder.tscn");
 	}
+
+	// --- Wallpaper (the 2D chrome behind the UI, not the lot's 3D sky) ---
+
+	/// <summary>Opens the wallpaper file browser. This node is the dialog's tree parent.</summary>
+	public void StartWallpaperPicker() => WallpaperService.RequestFileDialog(this);
+
+	/// <summary>Drops the wallpaper and returns to the default background.</summary>
+	public void ClearWallpaper() => WallpaperService.Clear();
 
 	public void InitiatePasswordPrompt(string username, bool isRegister)
 	{

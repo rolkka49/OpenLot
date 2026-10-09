@@ -21,6 +21,7 @@ public static class GizmoSelfTest
 
 		TestRemap();
 		TestSnap();
+		TestSnapResolve();
 		TestPlane();
 		TestSphere();
 		TestNearest();
@@ -32,6 +33,8 @@ public static class GizmoSelfTest
 		TestMatrixHelpers();
 		TestRotationDrag();
 		TestScaleDrag();
+		TestFaceScale();
+		TestFaceScaleDrag();
 		TestSelectionBulk();
 		TestMarqueeRect();
 		TestUiRectClamp();
@@ -99,6 +102,31 @@ public static class GizmoSelfTest
 		GizmoPlane groundPlane = new GizmoPlane(new Vector3(0f, 1f, 0f), Vector3.Zero);
 		CheckVec("Snap(Vector3,Plane) floors each tangent length",
 			GizmoMath.Snap(new Vector3(1.9f, 0.4f, 2.5f), groundPlane, 1.0f), new Vector3(1f, 0f, 2f));
+	}
+
+	/// <summary>
+	/// The widget-to-gizmo wire for GizmoController.ResolveSnap (§2.2): the toolbox toggle, the
+	/// hold-to-invert modifier, and the degrees-to-radians conversion the rotation gizmo needs.
+	/// </summary>
+	private static void TestSnapResolve()
+	{
+		// Toggle on, no modifier held: the increment reaches the gizmo unchanged.
+		CheckNear("Snap resolve passes an enabled increment",
+			GizmoController.ResolveSnap(true, 0.5f, false), 0.5f);
+
+		// Toggle off, no modifier: 0, which Im3d's Snap() treats as disabled.
+		CheckNear("Snap resolve is 0 when disabled",
+			GizmoController.ResolveSnap(false, 0.5f, false), 0.0f);
+
+		// Hold-to-invert: the modifier flips whichever the toggle says.
+		CheckNear("Snap resolve lets the modifier free an enabled snap",
+			GizmoController.ResolveSnap(true, 0.5f, true), 0.0f);
+		CheckNear("Snap resolve lets the modifier enable a disabled snap",
+			GizmoController.ResolveSnap(false, 0.5f, true), 0.5f);
+
+		// The toolbox stores rotation in degrees; the gizmo works in radians (15 deg = pi/12).
+		CheckNear("Snap resolve converts 15 degrees to radians",
+			Mathf.DegToRad(15.0f), 0.2617994f);
 	}
 
 	private static void TestPlane()
@@ -508,6 +536,241 @@ public static class GizmoSelfTest
 		changed = GizmoBehavior.AxisScaleBehavior(ctx, draw, axisId, origin, axis, 0f, worldHeight, worldSize, ref scale);
 		Check("Scale drag: release reports no change", !changed);
 		Check("Scale drag: release clears the active axis", ctx.ActiveId == GizmoContext.IdInvalid);
+
+		ctx.EndGizmo();
+	}
+
+	/// <summary>
+	/// The face-handle math (milestone 2.7): the face table and handle ids, face centres on the
+	/// mesh bounds (unrotated, scaled and rotated), the pick-bound half extents, and the drag
+	/// arithmetic — including the opposite-face-fixed contract and the 1e-4 scale floor.
+	/// </summary>
+	private static void TestFaceScale()
+	{
+		int plusZ = DecalMath.FaceIndex("+Z");
+		int minusZ = DecalMath.FaceIndex("-Z");
+		int plusX = DecalMath.FaceIndex("+X");
+		int minusX = DecalMath.FaceIndex("-X");
+		int plusY = DecalMath.FaceIndex("+Y");
+		int minusY = DecalMath.FaceIndex("-Y");
+
+		Check("Faces: the axis mapping covers all six",
+			FaceScaleMath.AxisForFace(plusZ) == 2 && FaceScaleMath.AxisForFace(minusZ) == 2
+			&& FaceScaleMath.AxisForFace(plusX) == 0 && FaceScaleMath.AxisForFace(minusX) == 0
+			&& FaceScaleMath.AxisForFace(plusY) == 1 && FaceScaleMath.AxisForFace(minusY) == 1);
+		Check("Faces: the sign is the normal's own direction",
+			FaceScaleMath.SignForFace(plusX) > 0f && FaceScaleMath.SignForFace(minusX) < 0f
+			&& FaceScaleMath.SignForFace(plusY) > 0f && FaceScaleMath.SignForFace(minusY) < 0f
+			&& FaceScaleMath.SignForFace(plusZ) > 0f && FaceScaleMath.SignForFace(minusZ) < 0f);
+		Check("Faces: handle ids sit outside the ported handle range",
+			FaceScaleMath.HandleBase > 8
+			&& FaceScaleMath.HandleId(0) == FaceScaleMath.HandleBase
+			&& FaceScaleMath.HandleId(5) == FaceScaleMath.HandleBase + 5
+			&& FaceScaleMath.HandleId(99) == FaceScaleMath.HandleBase + plusZ);
+
+		Vector3 min = new Vector3(-1f, -2f, -3f);
+		Vector3 max = new Vector3(1f, 2f, 3f);
+		CheckVec("Faces: +Z centre is the +Z bounds face", FaceScaleMath.LocalFaceCenter(plusZ, min, max), new Vector3(0f, 0f, 3f));
+		CheckVec("Faces: -X centre is the -X bounds face", FaceScaleMath.LocalFaceCenter(minusX, min, max), new Vector3(-1f, 0f, 0f));
+		CheckVec("Faces: +Y centre is the +Y bounds face", FaceScaleMath.LocalFaceCenter(plusY, min, max), new Vector3(0f, 2f, 0f));
+		CheckNear("Faces: the mesh half along +Z is the Z extent", FaceScaleMath.MeshHalfAlongAxis(plusZ, min, max), 3f);
+		CheckNear("Faces: the mesh half along +X is the X extent", FaceScaleMath.MeshHalfAlongAxis(plusX, min, max), 1f);
+
+		// A scaled host: the face centre lands on the *visual* face.
+		Transform3D scaled = new Transform3D(Basis.Identity.Scaled(new Vector3(2f, 1f, 0.5f)), Vector3.Zero);
+		CheckVec("Faces: a scaled host's +Z sphere sits on the visual face",
+			FaceScaleMath.WorldFaceCenter(plusZ, min, max, scaled), new Vector3(0f, 0f, 1.5f));
+		CheckVec("Faces: a scaled host's +X sphere sits on the visual face",
+			FaceScaleMath.WorldFaceCenter(plusX, min, max, scaled), new Vector3(2f, 0f, 0f));
+
+		// A rotated host: +90 deg about Y sends the local +Z face to world +X.
+		Vector3 unitMin = new Vector3(-1f, -1f, -1f);
+		Vector3 unitMax = new Vector3(1f, 1f, 1f);
+		Transform3D rotated = new Transform3D(new Basis(Vector3.Up, Mathf.Pi * 0.5f), Vector3.Zero);
+		CheckVec("Faces: a rotated host's +Z sphere follows the face to world +X",
+			FaceScaleMath.WorldFaceCenter(plusZ, unitMin, unitMax, rotated), new Vector3(1f, 0f, 0f));
+		CheckVec("Faces: a rotated host's +Z normal follows the rotation",
+			FaceScaleMath.WorldFaceNormal(plusZ, rotated), new Vector3(1f, 0f, 0f));
+		CheckVec("Faces: a non-uniform scale does not stretch the normal",
+			FaceScaleMath.WorldFaceNormal(plusZ, scaled), new Vector3(0f, 0f, 1f));
+
+		CheckVec("Faces: the world half extents of an unscaled bounds are the bounds halves",
+			FaceScaleMath.WorldHalfExtents(unitMin, unitMax, Transform3D.Identity), new Vector3(1f, 1f, 1f));
+		Transform3D diagonal = new Transform3D(new Basis(Vector3.Back, Mathf.Pi * 0.25f), Vector3.Zero);
+		Vector3 thinMin = new Vector3(-1f, 0f, 0f);
+		Vector3 thinMax = new Vector3(1f, 0f, 0f);
+		CheckVec("Faces: a 45-deg rotated sliver's half extents grow as expected",
+			FaceScaleMath.WorldHalfExtents(thinMin, thinMax, diagonal),
+			new Vector3(0.7071068f, 0.7071068f, 0f));
+
+		// The direction a drag is measured along: the face normal projected into the view plane.
+		CheckVec("Faces: a face-on view projects the normal to nothing",
+			FaceScaleMath.ProjectedAxisDirection(new Vector3(0f, 0f, 1f), new Vector3(0f, 0f, -1f)), Vector3.Zero);
+		CheckVec("Faces: a 45-deg view projects the normal to 45 deg",
+			FaceScaleMath.ProjectedAxisDirection(new Vector3(0f, 0f, 1f), new Vector3(0f, -0.7071068f, -0.7071068f)),
+			new Vector3(0f, -0.7071068f, 0.7071068f));
+		CheckVec("Faces: a perpendicular view keeps the normal as it is",
+			FaceScaleMath.ProjectedAxisDirection(new Vector3(0f, 1f, 0f), new Vector3(0f, 0f, -1f)),
+			new Vector3(0f, 1f, 0f));
+
+		// Drag arithmetic: one face moves, the opposite face is fixed by construction. The
+		// opposite-face check derives the new half extent from the NEW SCALE (not from the shift),
+		// so the assertion has content: opposite = new origin - new half.
+		Vector3 zNormal = new Vector3(0f, 0f, 1f);
+		FaceScaleMath.FaceDrag forth = FaceScaleMath.ResolveFaceDrag(plusZ, 1f, 0.5f, zNormal, new Vector3(0f, 0f, 0.4f), 0f);
+		Check("Faces: an outward drag changes the scale", forth.Changed);
+		CheckNear("Faces: dragging 0.4 out adds 0.2 to the half over a 0.5 half", forth.ScaleAxis, 1.4f);
+		CheckVec("Faces: the origin shifts by half the drag", forth.PositionShift, new Vector3(0f, 0f, 0.2f));
+		CheckNear("Faces: the opposite face stays put",
+			forth.PositionShift.Z - 0.5f * forth.ScaleAxis, -0.5f);
+
+		Vector3 negativeXNormal = new Vector3(-1f, 0f, 0f);
+		FaceScaleMath.FaceDrag mirrored = FaceScaleMath.ResolveFaceDrag(minusX, 1f, 0.5f, negativeXNormal, new Vector3(-0.6f, 0f, 0f), 0f);
+		CheckNear("Faces: a -X drag grows its own side outward", mirrored.ScaleAxis, 1.6f);
+		CheckVec("Faces: the -X shift follows the handle's own normal",
+			mirrored.PositionShift, new Vector3(-0.3f, 0f, 0f));
+		CheckNear("Faces: the +X face stays put on a -X drag",
+			0.5f + mirrored.PositionShift.X + 0.5f * (mirrored.ScaleAxis - 1f), 0.5f);
+
+		FaceScaleMath.FaceDrag snapped = FaceScaleMath.ResolveFaceDrag(plusZ, 1f, 0.5f, zNormal, new Vector3(0f, 0f, 0.26f), 0.1f);
+		CheckVec("Faces: the drag snaps in world units",
+			snapped.PositionShift, new Vector3(0f, 0f, 0.1f));
+
+		FaceScaleMath.FaceDrag floored = FaceScaleMath.ResolveFaceDrag(plusZ, 1f, 0.5f, zNormal, new Vector3(0f, 0f, -100f), 0f);
+		CheckNear("Faces: the scale floors at 1e-4", floored.ScaleAxis, FaceScaleMath.MinScale);
+		CheckNear("Faces: the shift stays consistent at the floor so the opposite face cannot move",
+			floored.PositionShift.Z - 0.5f * floored.ScaleAxis, -0.5f);
+
+		Check("Faces: a flat face refuses the drag (no thickness)",
+			!FaceScaleMath.ResolveFaceDrag(plusZ, 1f, 0f, zNormal, new Vector3(0f, 0f, 1f), 0f).Changed);
+		Check("Faces: an unchanged cursor reports no change",
+			!FaceScaleMath.ResolveFaceDrag(plusZ, 1f, 0.5f, zNormal, new Vector3(0.3f, 0f, 0f), 0f).Changed);
+		Check("Faces: the face floor is the milestone's 1e-4",
+			Mathf.IsEqualApprox(FaceScaleMath.MinScale, 1e-4f));
+	}
+
+	/// <summary>
+	/// One face drag end to end through the behavior's state machine, on the +Y face with the view
+	/// along -Z so every number is hand-checkable: hover, press (capture), drag 0.4 world units
+	/// along the face normal, release. With a unit cube (half 0.5) and a start scale of 1, the drag
+	/// must land on scale 1.4 and an origin of (0, 0.2, 0) — leaving the -Y face exactly where it
+	/// was. Holding the cursor still and dragging further are covered explicitly: both outputs are
+	/// absolute from press, so neither may accumulate (the drift regression).
+	/// </summary>
+	private static void TestFaceScaleDrag()
+	{
+		GizmoAppData appData = MakeTestAppData();
+		GizmoContext ctx = new GizmoContext(appData);
+		FaceScaleBehavior.DragState state = new FaceScaleBehavior.DragState();
+
+		Vector3 meshMin = new Vector3(-0.5f, -0.5f, -0.5f);
+		Vector3 meshMax = new Vector3(0.5f, 0.5f, 0.5f);
+		Transform3D transform = Transform3D.Identity;
+		int face = DecalMath.FaceIndex("+Y");
+		uint id = GizmoContext.MakeHandleId(1, FaceScaleMath.HandleId(face));
+		float scaleY = 1f;
+		float handleRadius = 0.2f;
+		float meshHalf = FaceScaleMath.MeshHalfAlongAxis(face, meshMin, meshMax);
+		Vector3 centre = FaceScaleMath.WorldFaceCenter(face, meshMin, meshMax, transform);
+		Vector3 normal = FaceScaleMath.WorldFaceNormal(face, transform);
+
+		ctx.BeginGizmo(1);
+		appData.SnapScale = 0f;
+		appData.ViewOrigin = new Vector3(0f, 0.5f, 10f);
+
+		// Frame 1 — hover: the ray is aimed at the +Y face centre.
+		appData.CursorRayOrigin = new Vector3(0f, 0.5f, 10f);
+		appData.CursorRayDirection = new Vector3(0f, 0f, -1f);
+		appData.KeyDown[GizmoKeys.ActionSelect] = false;
+		ctx.BeginFrame();
+		bool changed = FaceScaleBehavior.Apply(ctx, id, face, centre, normal, transform.Origin, handleRadius,
+			scaleY, meshHalf, appData.SnapScale, ref state, out float newScale, out Vector3 newOrigin);
+		Check("Face drag: hover reports no change", !changed);
+		Check("Face drag: the sphere is hot after hover", ctx.HotId == id);
+
+		// Frame 2 — press: the capture records the camera-facing plane through the face centre and
+		// the in-plane direction the drag is measured along (here exactly +Y, since the view runs
+		// along -Z).
+		appData.KeyDown[GizmoKeys.ActionSelect] = true;
+		ctx.BeginFrame();
+		changed = FaceScaleBehavior.Apply(ctx, id, face, centre, normal, transform.Origin, handleRadius,
+			scaleY, meshHalf, appData.SnapScale, ref state, out newScale, out newOrigin);
+		Check("Face drag: press activates the sphere", ctx.ActiveId == id);
+		Check("Face drag: the press is captured", state.Captured && state.Face == face);
+		CheckVec("Face drag: the anchor sits on the face centre", state.Anchor, new Vector3(0f, 0.5f, 0f));
+		CheckVec("Face drag: the measured direction is the face normal in-plane", state.AxisDir, new Vector3(0f, 1f, 0f));
+
+		// Frame 3 — drag 0.4 world units along the normal (the cursor moves up on screen): the
+		// origin shifts by half of it and the half-extent grows by the other half, so the -Y face
+		// stays exactly where it was.
+		appData.CursorRayOrigin = new Vector3(0f, 0.9f, 10f);
+		ctx.BeginFrame();
+		changed = FaceScaleBehavior.Apply(ctx, id, face, centre, normal, transform.Origin, handleRadius,
+			scaleY, meshHalf, appData.SnapScale, ref state, out newScale, out newOrigin);
+		Check("Face drag: the drag reports a change", changed);
+		CheckNear("Face drag: the scale grows by half the drag over the half extent", newScale, 1.4f);
+		CheckVec("Face drag: the origin lands at the press origin plus half the drag",
+			newOrigin, new Vector3(0f, 0.2f, 0f));
+		CheckNear("Face drag: the opposite face stays put",
+			newOrigin.Y - meshHalf * newScale, -0.5f);
+
+		// Frame 3b — the same cursor position again. Absolute outputs mean nothing may accumulate:
+		// this is the drift regression, where holding the cursor still walked the part away.
+		ctx.BeginFrame();
+		changed = FaceScaleBehavior.Apply(ctx, id, face, centre, normal, transform.Origin, handleRadius,
+			scaleY, meshHalf, appData.SnapScale, ref state, out newScale, out newOrigin);
+		Check("Face drag: holding still keeps the scale where it was", changed && Mathf.Abs(newScale - 1.4f) < 1e-4f);
+		CheckVec("Face drag: holding still keeps the origin where it was",
+			newOrigin, new Vector3(0f, 0.2f, 0f));
+
+		// Frame 3c — drag further, 0.6 in total: the outputs stay absolute, so the origin is the
+		// press origin plus 0.3 — not the sum of both frames' offsets.
+		appData.CursorRayOrigin = new Vector3(0f, 1.1f, 10f);
+		ctx.BeginFrame();
+		changed = FaceScaleBehavior.Apply(ctx, id, face, centre, normal, transform.Origin, handleRadius,
+			scaleY, meshHalf, appData.SnapScale, ref state, out newScale, out newOrigin);
+		Check("Face drag: a further drag tracks the cursor", changed);
+		CheckNear("Face drag: the further drag's scale is absolute", newScale, 1.6f);
+		CheckVec("Face drag: the further drag's origin is absolute",
+			newOrigin, new Vector3(0f, 0.3f, 0f));
+		CheckNear("Face drag: the opposite face is still put after the further drag",
+			newOrigin.Y - meshHalf * newScale, -0.5f);
+
+		// Frame 4 — release.
+		appData.KeyDown[GizmoKeys.ActionSelect] = false;
+		ctx.BeginFrame();
+		changed = FaceScaleBehavior.Apply(ctx, id, face, centre, normal, transform.Origin, handleRadius,
+			newScale, meshHalf, appData.SnapScale, ref state, out newScale, out newOrigin);
+		Check("Face drag: release reports no change", !changed);
+		Check("Face drag: release clears the active sphere", ctx.ActiveId == GizmoContext.IdInvalid);
+		Check("Face drag: release drops the capture", !state.Captured);
+
+		// Head-on view: with the camera on the face axis the projected direction is zero, so a drag
+		// must produce NO motion. The Im3d axis-line measurement (closest approach) divides by a
+		// vanishing sine there and would fling the scale to an extreme — the regression this
+		// scheme exists to prevent.
+		FaceScaleBehavior.DragState headOn = new FaceScaleBehavior.DragState();
+		int plusZ = DecalMath.FaceIndex("+Z");
+		uint headOnId = GizmoContext.MakeHandleId(1, FaceScaleMath.HandleId(plusZ));
+		Vector3 zCentre = FaceScaleMath.WorldFaceCenter(plusZ, meshMin, meshMax, transform);
+		Vector3 zNormal = FaceScaleMath.WorldFaceNormal(plusZ, transform);
+		appData.ViewOrigin = new Vector3(0f, 0f, 10f);
+		appData.CursorRayOrigin = new Vector3(0f, 0f, 10f);
+		appData.CursorRayDirection = new Vector3(0f, 0f, -1f);
+		appData.KeyDown[GizmoKeys.ActionSelect] = false;
+		ctx.BeginFrame();
+		FaceScaleBehavior.Apply(ctx, headOnId, plusZ, zCentre, zNormal, transform.Origin, handleRadius,
+			1f, 0.5f, appData.SnapScale, ref headOn, out _, out _);
+		appData.KeyDown[GizmoKeys.ActionSelect] = true;
+		ctx.BeginFrame();
+		FaceScaleBehavior.Apply(ctx, headOnId, plusZ, zCentre, zNormal, transform.Origin, handleRadius,
+			1f, 0.5f, appData.SnapScale, ref headOn, out _, out _);
+		Check("Face drag: a head-on press is captured", headOn.Captured && headOn.AxisDir == Vector3.Zero);
+		appData.CursorRayOrigin = new Vector3(0.4f, 0f, 10f);
+		ctx.BeginFrame();
+		changed = FaceScaleBehavior.Apply(ctx, headOnId, plusZ, zCentre, zNormal, transform.Origin, handleRadius,
+			1f, 0.5f, appData.SnapScale, ref headOn, out _, out _);
+		Check("Face drag: a head-on drag produces no motion instead of a jump", !changed);
 
 		ctx.EndGizmo();
 	}

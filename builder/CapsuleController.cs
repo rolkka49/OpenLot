@@ -17,6 +17,13 @@ public sealed class CapsuleController
 	private const float Gravity = 24f;
 	private const float TerminalFall = -45f;
 
+	/// <summary>Below this closing speed nothing is pushed, so resting/brushing contacts stay calm.</summary>
+	private const float PushMinSpeed = 0.25f;
+
+	/// <summary>Cap on the speed the push transfers; the controller's own MoveSpeed is only slightly
+	/// higher, so a sprint cannot rocket a part.</summary>
+	private const float PushMaxSpeed = 8f;
+
 	private readonly BuilderScene _scene;
 	private CharacterBody3D _body;
 	private LotObject _character;
@@ -50,10 +57,11 @@ public sealed class CapsuleController
 
 		_body = new CharacterBody3D();
 		_body.Name = "PlayerBody";
-		// Layer 0 so the body is never a collision target or a pick hit; mask 1 so it detects the
-		// lot's parts — the same split PartDragController.CreateMover uses.
+		// Layer 0 so the body is never a collision target or a pick hit; the mask is the Character
+		// group's row of the §3.5 matrix, so which parts the player collides with is creator-set —
+		// the same split PartDragController.CreateMover uses.
 		_body.CollisionLayer = 0;
-		_body.CollisionMask = 1;
+		_body.CollisionMask = LotCollisionGroups.MaskForName(LotCollisionGroups.CharacterGroup);
 		_body.SetMeta(LotObject.InternalChildMeta, true);
 
 		CapsuleShape3D shape = new CapsuleShape3D();
@@ -131,11 +139,69 @@ public sealed class CapsuleController
 			_verticalVelocity = Mathf.Max(_verticalVelocity - Gravity * dt, TerminalFall);
 		}
 
-		_body.Velocity = horizontal + Vector3.Up * _verticalVelocity;
+		Vector3 commanded = horizontal + Vector3.Up * _verticalVelocity;
+		_body.Velocity = commanded;
 		_body.MoveAndSlide();
+		// The push reads the COMMANDED velocity, not _body.Velocity: move_and_slide rewrites
+		// Velocity into the post-slide (blocked) value, so the closing speed would already read
+		// zero exactly when the player is pressed against the body being pushed.
+		PushCollidedBodies(commanded);
 
 		// The visible part follows the swept body, so collision resolution (walls, slopes, the
 		// ground) is what the creator sees.
 		_character.GlobalPosition = _body.GlobalPosition;
+	}
+
+	/// <summary>
+	/// Hands the player's motion into the dynamic bodies it ran into. A <c>CharacterBody3D</c> is
+	/// kinematic, and the engine never transfers a kinematic body's movement into a
+	/// <c>RigidBody3D</c> — without this, a loose part the player walks into behaves like a wall
+	/// ("it freezes against the character"). Each slide collision with a rigid body gets the
+	/// impulse that closes the speed gap along the contact normal, applied at the contact point
+	/// (so a hinged part swings rather than sliding rigidly) and mass-scaled (light and heavy
+	/// parts answer at the same pace — the Roblox feel).
+	///
+	/// The body is woken first: a sleeping body swallows impulses, and that alone reads as a
+	/// freeze. Anchored parts are static bodies, so they are not pushed — by design.
+	/// </summary>
+	private void PushCollidedBodies(Vector3 commandedVelocity)
+	{
+		int count = _body.GetSlideCollisionCount();
+		for (int i = 0; i < count; i++)
+		{
+			KinematicCollision3D collision = _body.GetSlideCollision(i);
+			RigidBody3D pushed = collision.GetCollider() as RigidBody3D;
+			if (pushed == null || !GodotObject.IsInstanceValid(pushed)) continue;
+
+			Vector3 impulse;
+			if (!TryComputePush(commandedVelocity, collision.GetNormal(), pushed.LinearVelocity,
+				pushed.Mass, out impulse)) continue;
+
+			pushed.Sleeping = false;
+			pushed.ApplyImpulse(impulse, collision.GetPosition() - pushed.GlobalPosition);
+		}
+	}
+
+	/// <summary>
+	/// The impulse for one contact — pure, so the self-test can pin the arithmetic (the integral
+	/// is <see cref="PushCollidedBodies"/>). False when there is no push to make: the player is not
+	/// closing in on the surface, or the body is already keeping up along the normal. Closing the
+	/// deficit rather than adding a fixed force is what stops a continued contact from
+	/// accelerating the body without bound.
+	/// </summary>
+	public static bool TryComputePush(Vector3 playerVelocity, Vector3 contactNormal,
+		Vector3 bodyVelocity, float bodyMass, out Vector3 impulse)
+	{
+		impulse = Vector3.Zero;
+		Vector3 pushDirection = -contactNormal; // the normal faces the player; push goes the other way
+		float closing = playerVelocity.Dot(pushDirection);
+		if (closing <= PushMinSpeed) return false;
+
+		float bodyAlong = bodyVelocity.Dot(pushDirection);
+		float deficit = Mathf.Min(closing, PushMaxSpeed) - bodyAlong;
+		if (deficit <= PushMinSpeed) return false;
+
+		impulse = pushDirection * (deficit * bodyMass);
+		return true;
 	}
 }

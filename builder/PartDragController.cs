@@ -17,7 +17,6 @@ using Godot;
 /// </summary>
 public sealed class PartDragController
 {
-	private const uint PartLayer = 1;
 	private const float PickDistance = 10000.0f;
 
 	// MoveAndCollide resolves one contact per call; this bounds how many slide steps a single drag
@@ -54,6 +53,25 @@ public sealed class PartDragController
 	private Vector3 _grabOffset;
 	private Vector3 _centreLocal;
 
+	/// <summary>Transform at drag start; the whole drag becomes one history entry on release.</summary>
+	private Transform3D _dragBefore;
+
+	// Decal face-slide drag (milestone 2.6): with the Decal tool armed, a drag on a host slides the
+	// image panel across the face instead of moving the part. _decalGrabDelta keeps the point under
+	// the cursor pinned to the panel, the same way a part drag keeps its grab point. The whole drag
+	// is one history entry on release, exactly like a part drag.
+	private bool _decalTool;
+	private LotObject _draggedDecal;
+	private Vector2 _decalBefore;
+	private Vector2 _decalGrabDelta;
+	private Vector3 _decalPlaneOrigin;
+	private Vector3 _decalPlaneNormal;
+
+	/// <summary>Property ids the decal slide writes through, so the drag uses the same single write
+	/// path (and therefore the same clamping and dirty-marking) as the Inspector field.</summary>
+	private const string DecalOffsetUId = "decal_offset_u";
+	private const string DecalOffsetVId = "decal_offset_v";
+
 	public PartDragController(Builder builder, BuilderScene scene)
 	{
 		_builder = builder;
@@ -63,14 +81,15 @@ public sealed class PartDragController
 	/// <summary>The part currently under the mouse button, or null when nothing is being dragged.</summary>
 	public LotObject DraggedNode { get { return _dragged; } }
 
-	public bool IsDragging { get { return _dragged != null; } }
+	public bool IsDragging { get { return _dragged != null || _draggedDecal != null; } }
 
 	/// <summary>
 	/// Queues a left-press. Consumed by <see cref="Tick"/> on the next physics step.
 	/// <paramref name="allowDrag"/> is false outside Select mode, where the click should still
-	/// select the part but the gizmo owns all dragging.
+	/// select the part but the gizmo owns all dragging. <paramref name="decalTool"/> arms the decal
+	/// face tool, whose press places/picks up a decal panel instead of touching parts.
 	/// </summary>
-	public void QueuePress(Vector3 rayOrigin, Vector3 rayDirection, bool additive, bool allowDrag)
+	public void QueuePress(Vector3 rayOrigin, Vector3 rayDirection, bool additive, bool allowDrag, bool decalTool)
 	{
 		_cursorRayOrigin = rayOrigin;
 		_cursorRayDirection = rayDirection;
@@ -78,6 +97,7 @@ public sealed class PartDragController
 		_pressQueued = true;
 		_additivePress = additive;
 		_allowDrag = allowDrag;
+		_decalTool = decalTool;
 
 		// Create the mover now, during the ImGui layout, so its collision body and shape are
 		// registered in the physics space well before the physics step consumes this press.
@@ -118,10 +138,22 @@ public sealed class PartDragController
 			FollowCursor();
 		}
 
+		if (_draggedDecal != null)
+		{
+			FollowDecalCursor();
+		}
+
 		if (_releaseQueued)
 		{
 			_releaseQueued = false;
-			EndDrag();
+			if (_draggedDecal != null)
+			{
+				EndDecalDrag();
+			}
+			else
+			{
+				EndDrag();
+			}
 		}
 	}
 
@@ -132,7 +164,7 @@ public sealed class PartDragController
 			return;
 		}
 
-		LotObject hit = Pick(_scene, _cursorRayOrigin, _cursorRayDirection, out Vector3 hitPosition);
+		LotObject hit = Pick(_scene, _cursorRayOrigin, _cursorRayDirection, out Vector3 hitPosition, out Vector3 hitNormal);
 #if DEBUG
 		// One line per click: the fastest way to tell "the ray missed" apart from "the click never
 		// reached the viewport" when a drag does not grab anything.
@@ -143,6 +175,14 @@ public sealed class PartDragController
 		{
 			// Background click: clear the selection, exactly like the old viewport click handler.
 			_builder.Selection.ClearSelection();
+			return;
+		}
+
+		// The decal tool owns its press entirely: its click means "this face" (place a panel there,
+		// or pick up the panel already there), never "this part".
+		if (_decalTool)
+		{
+			HandleDecalPress(hit, hitPosition, hitNormal);
 			return;
 		}
 
@@ -175,6 +215,8 @@ public sealed class PartDragController
 	private void BeginDrag(LotObject hit, Vector3 hitPosition)
 	{
 		EnsureMover();
+		// Captured before the initial placement below, so that placement is part of the entry too.
+		_dragBefore = hit.Transform;
 
 #if DEBUG
 		_contactLogsRemaining = 12;
@@ -203,7 +245,6 @@ public sealed class PartDragController
 		if (startMove.LengthSquared() > 1e-8f)
 		{
 			MovePartWithCollision(_mover, _moverShape, hit, startMove);
-			_builder.MarkDirty();
 		}
 
 		_dragged = hit;
@@ -226,8 +267,188 @@ public sealed class PartDragController
 		{
 			return;
 		}
+		LotObject node = _dragged;
 		_dragged = null;
 		_builder.Outline.Refresh();
+
+		// One entry for the whole drag; no-op when the part came back to where it started.
+		if (!GodotObject.IsInstanceValid(node)) return;
+		if (!TransformCommand.Changed(_dragBefore, node.Transform)) return;
+		_builder.History.Push(new TransformCommand("Move", node, _dragBefore, node.Transform));
+	}
+
+	// --- Decal face slide (milestone 2.6) ---
+
+	/// <summary>
+	/// The decal tool's press: work out which face of the clicked part the cursor landed on, then
+	/// either pick up the panel already there (and start sliding it) or place a new one at the
+	/// clicked spot. The face is derived from the surface normal the raycast reported, so "select a
+	/// specific face" and "drag it around" are one gesture: you click the face you mean.
+	/// </summary>
+	private void HandleDecalPress(LotObject hit, Vector3 hitPosition, Vector3 hitNormal)
+	{
+		int face = FaceUnderPoint(hit, hitPosition, hitNormal, out Vector3 visualPoint);
+		LotObject existing = FindDecalAt(hit, face, visualPoint);
+		if (existing != null)
+		{
+			_builder.Selection.Select(existing, false);
+			BeginDecalDrag(existing, hit);
+			return;
+		}
+
+		// Bare surface: place a panel centred on the clicked spot (the decal clamps both values, so
+		// a click near the edge still lands fully on the face).
+		Vector3 size = DecalMath.MeshSize(hit.MeshInstance != null ? hit.MeshInstance.Mesh : null);
+		Vector2 at = DecalMath.OffsetsFromPoint(size, hit.Scale, face, visualPoint);
+		_builder.Scene.InsertDecal(_builder, hit, face, at.X, at.Y);
+	}
+
+	/// <summary>Which face of the host a world point/normal pair belongs to, and where on it the
+	/// point sits (in the host's visual space — the space the placement math measures in).</summary>
+	private static int FaceUnderPoint(LotObject host, Vector3 worldPoint, Vector3 worldNormal, out Vector3 visualPoint)
+	{
+		visualPoint = ToVisualPoint(host, worldPoint);
+		Vector3 localNormal = host.GlobalTransform.Basis.Inverse() * worldNormal;
+		return DecalMath.FaceFromNormal(localNormal);
+	}
+
+	/// <summary>A world point in the host's visual space: its local coordinates with the host's
+	/// scale applied, which is the space decal offsets and sizes are fractions of.</summary>
+	private static Vector3 ToVisualPoint(LotObject host, Vector3 worldPoint)
+	{
+		Vector3 local = host.ToLocal(worldPoint);
+		return new Vector3(local.X * host.Scale.X, local.Y * host.Scale.Y, local.Z * host.Scale.Z);
+	}
+
+	/// <summary>The topmost existing decal of <paramref name="host"/> covering a point on its face,
+	/// or null for bare surface. Last child wins, matching draw order, so the panel the creator
+	/// sees on top is the one a click picks up.</summary>
+	private static LotObject FindDecalAt(LotObject host, int face, Vector3 visualPoint)
+	{
+		Vector3 size = DecalMath.MeshSize(host.MeshInstance != null ? host.MeshInstance.Mesh : null);
+		LotObject found = null;
+		for (int i = 0; i < host.GetChildCount(); i++)
+		{
+			LotObject child = host.GetChild(i) as LotObject;
+			if (child == null || child.Kind != LotObjectKind.Decal) continue;
+			if (DecalMath.CoversPoint(size, host.Scale, child.DecalFace, child.DecalOffsetU, child.DecalOffsetV,
+				child.DecalScaleU, child.DecalScaleV, face, visualPoint))
+			{
+				found = child;
+			}
+		}
+		return found;
+	}
+
+	/// <summary>
+	/// Starts a slide: the drag plane is the patch's own face, and the offset between the patch's
+	/// centre and the point grabbed on the face is held constant for the whole drag, so the image
+	/// does not jump to the cursor.
+	/// </summary>
+	private void BeginDecalDrag(LotObject decal, LotObject host)
+	{
+		_decalBefore = new Vector2(decal.DecalOffsetU, decal.DecalOffsetV);
+		_decalPlaneOrigin = decal.GlobalPosition;
+		_decalPlaneNormal = decal.GlobalTransform.Basis.Z.Normalized();
+		_decalGrabDelta = Vector2.Zero;
+
+		if (TryCursorPointOnDecalPlane(out Vector3 grabbed))
+		{
+			Vector2 cursorOffset = FaceOffsetOfWorldPoint(host, decal.DecalFace, grabbed);
+			_decalGrabDelta = _decalBefore - cursorOffset;
+		}
+
+		_draggedDecal = decal;
+	}
+
+	/// <summary>
+	/// Slides the patch to follow the cursor on its face plane. The ray/plane intersection is
+	/// recomputed from scratch every frame (like a part drag), so the image neither drifts nor lags,
+	/// and a view that is nearly edge-on to the face simply leaves the patch alone instead of
+	/// flicking it to an extreme.
+	/// </summary>
+	private void FollowDecalCursor()
+	{
+		if (_draggedDecal == null || !GodotObject.IsInstanceValid(_draggedDecal))
+		{
+			EndDecalDrag();
+			return;
+		}
+		if (!_hasCursorRay)
+		{
+			EndDecalDrag();
+			return;
+		}
+		LotObject host = _draggedDecal.GetParent() as LotObject;
+		if (host == null)
+		{
+			EndDecalDrag();
+			return;
+		}
+		if (!TryCursorPointOnDecalPlane(out Vector3 anchor))
+		{
+			return;
+		}
+
+		Vector2 wanted = FaceOffsetOfWorldPoint(host, _draggedDecal.DecalFace, anchor) + _decalGrabDelta;
+		ApplyDecalOffsets(_builder, _draggedDecal, wanted);
+	}
+
+	/// <summary>Where the cursor ray meets the patch's face plane, in world space.</summary>
+	private bool TryCursorPointOnDecalPlane(out Vector3 point)
+	{
+		point = Vector3.Zero;
+		float denominator = _cursorRayDirection.Dot(_decalPlaneNormal);
+		if (Mathf.Abs(denominator) < 1e-4f) return false;
+		float along = (_decalPlaneOrigin - _cursorRayOrigin).Dot(_decalPlaneNormal) / denominator;
+		if (along <= 0f) return false;
+		point = _cursorRayOrigin + _cursorRayDirection * along;
+		return true;
+	}
+
+	/// <summary>
+	/// The fractional (u, v) on the host's face a world point maps to. The point is converted into
+	/// the host's visual space, because a decal's fractions are measured there (the space the
+	/// host's scaled mesh occupies) — see <see cref="DecalMath"/>.
+	/// </summary>
+	private static Vector2 FaceOffsetOfWorldPoint(LotObject host, int face, Vector3 worldPoint)
+	{
+		Vector3 size = DecalMath.MeshSize(host.MeshInstance != null ? host.MeshInstance.Mesh : null);
+		return DecalMath.OffsetsFromPoint(size, host.Scale, face, ToVisualPoint(host, worldPoint));
+	}
+
+	/// <summary>
+	/// Ends a slide. The whole gesture becomes one history entry (the same rule a part drag
+	/// follows), pushed only when the offset actually changed. Both axes travel together, so undo
+	/// of a diagonal slide is a single step.
+	/// </summary>
+	private void EndDecalDrag()
+	{
+		if (_draggedDecal == null) return;
+		LotObject decal = _draggedDecal;
+		_draggedDecal = null;
+		if (!GodotObject.IsInstanceValid(decal)) return;
+
+		Vector2 before = _decalBefore;
+		Vector2 after = new Vector2(decal.DecalOffsetU, decal.DecalOffsetV);
+		if (before == after) return;
+
+		_builder.History.Push(new DelegateCommand("Move Decal",
+			b => ApplyDecalOffsets(b, decal, after),
+			b => ApplyDecalOffsets(b, decal, before)));
+	}
+
+	/// <summary>
+	/// Writes both offset axes through the property descriptors — the one write path — so a drag
+	/// clamps exactly like the Inspector field and a script do. The raw apply is deliberate: a drag
+	/// is a live edit session, and the single history entry is pushed on release.
+	/// </summary>
+	private static void ApplyDecalOffsets(Builder builder, LotObject decal, Vector2 offsets)
+	{
+		LotPropertyDescriptor offsetU = LotPropertyRegistry.Find(DecalOffsetUId);
+		LotPropertyDescriptor offsetV = LotPropertyRegistry.Find(DecalOffsetVId);
+		if (offsetU != null) builder.Properties.ApplyFloat(decal, offsetU, offsets.X);
+		if (offsetV != null) builder.Properties.ApplyFloat(decal, offsetV, offsets.Y);
 	}
 
 	private void FollowCursor()
@@ -259,7 +480,6 @@ public sealed class PartDragController
 		}
 
 		MoveDragged(frameDelta);
-		_builder.MarkDirty();
 	}
 
 	/// <summary>
@@ -280,7 +500,7 @@ public sealed class PartDragController
 	/// </summary>
 	internal static void MovePartWithCollision(CharacterBody3D mover, CollisionShape3D moverShape, LotObject dragged, Vector3 frameDelta)
 	{
-		StaticBody3D ownBody = dragged.CollisionBody;
+		PhysicsBody3D ownBody = dragged.CollisionBody;
 		CollisionShape3D ownShape = dragged.CollisionShape;
 		if (ownBody == null || ownShape == null || ownShape.Shape == null)
 		{
@@ -344,10 +564,24 @@ public sealed class PartDragController
 	/// <summary>
 	/// Raycasts the lot physics space and returns the nearest part, if any. Static and internal so
 	/// the DEBUG self-test can exercise the real pick path against a live physics space.
+	///
+	/// Uses <see cref="LotObject.EditorPickMask"/> rather than the gameplay part layer: a part with
+	/// `CanCollide = false` moved to the no-collide layer must stay selectable and draggable in the
+	/// editor (milestone 2.3), and this mask is the only thing that makes that work.
 	/// </summary>
 	internal static LotObject Pick(BuilderScene scene, Vector3 origin, Vector3 direction, out Vector3 hitPosition)
 	{
+		return Pick(scene, origin, direction, out hitPosition, out Vector3 _);
+	}
+
+	/// <summary>
+	/// The normal-reporting overload: the decal tool needs the surface normal the ray hit, because
+	/// that is what names the face a click landed on (see the face-from-normal mapping).
+	/// </summary>
+	internal static LotObject Pick(BuilderScene scene, Vector3 origin, Vector3 direction, out Vector3 hitPosition, out Vector3 hitNormal)
+	{
 		hitPosition = Vector3.Zero;
+		hitNormal = Vector3.Zero;
 
 		// Query the world the lot parts actually live in (LotRoot's resolved World3D) rather than
 		// the SubViewport's own world: the SubViewport only materializes its own world once it is
@@ -358,7 +592,7 @@ public sealed class PartDragController
 		{
 			return null;
 		}
-		PhysicsRayQueryParameters3D query = PhysicsRayQueryParameters3D.Create(origin, origin + direction * PickDistance, PartLayer);
+		PhysicsRayQueryParameters3D query = PhysicsRayQueryParameters3D.Create(origin, origin + direction * PickDistance, LotObject.EditorPickMask);
 		query.CollideWithAreas = false;
 		query.CollideWithBodies = true;
 
@@ -369,6 +603,7 @@ public sealed class PartDragController
 		}
 
 		hitPosition = (Vector3)result["position"];
+		hitNormal = result.ContainsKey("normal") ? (Vector3)result["normal"] : Vector3.Zero;
 		return FindLotObject(result["collider"].As<Node>());
 	}
 
@@ -397,7 +632,7 @@ public sealed class PartDragController
 		Godot.Collections.Array<Rid> exclude = new Godot.Collections.Array<Rid>();
 		exclude.Add(excluded.CollisionBody.GetRid());
 
-		PhysicsRayQueryParameters3D query = PhysicsRayQueryParameters3D.Create(origin, origin + direction * PickDistance, PartLayer, exclude);
+		PhysicsRayQueryParameters3D query = PhysicsRayQueryParameters3D.Create(origin, origin + direction * PickDistance, LotCollisionGroups.AllBits, exclude);
 		query.CollideWithAreas = false;
 		query.CollideWithBodies = true;
 
@@ -439,14 +674,16 @@ public sealed class PartDragController
 
 	/// <summary>
 	/// Creates a kinematic mover in the lot world. Layer 0 so it is never a collision target or a
-	/// pick hit; mask 1 so it still detects the lot parts, which is the whole point.
+	/// pick hit; mask <see cref="LotCollisionGroups.AllBits"/> so it still bumps against lot parts in
+	/// any group, which is the whole point (a no-collide part stays on its own reserved bit and is
+	/// passed through, as before).
 	/// </summary>
 	internal static CharacterBody3D CreateMover(BuilderScene scene, out CollisionShape3D moverShape)
 	{
 		CharacterBody3D mover = new CharacterBody3D();
 		mover.Name = "PartDragMover";
 		mover.CollisionLayer = 0;
-		mover.CollisionMask = PartLayer;
+		mover.CollisionMask = LotCollisionGroups.AllBits;
 		mover.SetMeta(LotObject.InternalChildMeta, true);
 
 		moverShape = new CollisionShape3D();

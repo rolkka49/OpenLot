@@ -573,7 +573,9 @@ public static class GizmoBehavior
 		draw.Line(new Vector3(b.X, b.Y, a.Z), new Vector3(b.X, b.Y, b.Z), 1.0f, c);
 	}
 
-	private static Color WithAlpha(Color color, float alpha)
+	/// <summary>Applies an alpha to a colour. Internal so the face-handle draw (GizmoController, an
+	/// OpenLot-original feature) reuses this one implementation instead of a second copy.</summary>
+	internal static Color WithAlpha(Color color, float alpha)
 	{
 		return new Color(color.R, color.G, color.B, alpha);
 	}
