@@ -33,6 +33,7 @@ public sealed class ScriptRuntime
 	private readonly Func<bool> _isSuspended;
 	private readonly LotEventRegistry _events;
 	private readonly Func<bool> _eventsActive;
+	private readonly LotScheduler _scheduler;
 	private readonly List<string> _loaded = new List<string>();
 	// Entities whose scripts declared onFrame, in load order (design doc D15). Pruned lazily when a
 	// handler vanishes (destroyed or reloaded).
@@ -63,9 +64,13 @@ public sealed class ScriptRuntime
 	/// <param name="events">The lot's event registry (milestone 3.7): ticked while a session is
 	/// active and cleared on every reload, so sensors and subscriptions never survive the world
 	/// they belonged to. Null keeps the pre-3.7 behaviour (no event drain).</param>
-	/// <param name="eventsActive">Session gate for the event drain and onFrame (design doc D1).</param>
+	/// <param name="eventsActive">Session gate for the event drain, the scheduler and onFrame
+	/// (design doc D1/D8).</param>
+	/// <param name="scheduler">The lot's tween/timer schedule (milestone 3.8): advanced while a
+	/// session is active and cleared on every reload. Null keeps the pre-3.8 behaviour.</param>
 	public ScriptRuntime(Func<LuaNetBridge> bridgeResolver, Action<string> warn, Action afterFrame = null,
-		Func<bool> isSuspended = null, LotEventRegistry events = null, Func<bool> eventsActive = null)
+		Func<bool> isSuspended = null, LotEventRegistry events = null, Func<bool> eventsActive = null,
+		LotScheduler scheduler = null)
 	{
 		_bridgeResolver = bridgeResolver;
 		_warn = warn;
@@ -73,6 +78,7 @@ public sealed class ScriptRuntime
 		_isSuspended = isSuspended;
 		_events = events;
 		_eventsActive = eventsActive;
+		_scheduler = scheduler;
 	}
 
 	/// <summary>
@@ -120,8 +126,10 @@ public sealed class ScriptRuntime
 		bridge.ClearRegistries();
 		// The event layer is a clean slate too (design doc D13): both registries clear and every
 		// sensor comes down; the re-run scripts re-subscribe, and the session's next drain
-		// re-attaches the sensors.
+		// re-attaches the sensors. The tween/timer schedule clears with them (3.8 D8) — nothing
+		// scheduled survives a reload.
 		if (_events != null) _events.ClearAll();
+		if (_scheduler != null) _scheduler.ClearAll();
 		_frameEntities.Clear();
 		// F2: every load is a restart, so the entities the previous load spawned are removed first —
 		// that is what keeps a root script spawning the capsule/camera from duplicating them.
@@ -189,12 +197,16 @@ public sealed class ScriptRuntime
 			HandleRebuild(bridge);
 
 		bridge.BeginFrame();
-		// Events and onFrame fire only inside a player session (design doc D1): they are
-		// physics-driven, and build mode must not fire touch storms or fight the gizmo/undo.
-		// Drained before the net queue so a handler's net.* call dispatches the same frame.
-		if (_events != null && (_eventsActive == null || _eventsActive()))
+		// Events, the tween/timer schedule and onFrame fire only inside a player session (design
+		// doc D1/D8): they are runtime behaviour, and build mode must not fire touch storms or
+		// fight the gizmo/undo. Events drain before the scheduler so a handler's net.* call still
+		// dispatches the same frame; the scheduler runs before onFrame so a frame sees the values
+		// its tweens just wrote.
+		bool sessionActive = _eventsActive == null || _eventsActive();
+		if (sessionActive && (_events != null || _scheduler != null))
 		{
-			_events.Drain();
+			if (_events != null) _events.Drain();
+			if (_scheduler != null) _scheduler.Advance(delta);
 			TickFrames(bridge, delta);
 		}
 		if (bridge.Router != null) bridge.Router.Flush();
@@ -326,6 +338,7 @@ public sealed class ScriptRuntime
 		_loaded.Clear();
 		_quarantined.Clear(); // fresh lot: quarantine is per-lot state
 		if (_events != null) _events.ClearAll();
+		if (_scheduler != null) _scheduler.ClearAll();
 		_frameEntities.Clear();
 		_lotRoot = null;
 		_ensureHandle = null;

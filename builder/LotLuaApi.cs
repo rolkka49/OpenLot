@@ -775,6 +775,38 @@ public class LotLuaApi
 		_scene.Events.Unsubscribe(handle, targetHandle, eventName);
 	}
 
+	// --- tween/timer plumbing (milestone 3.8) ---
+	//
+	// These three are NOT creator API: the bootstrap's Lot.Tween* overrides and the per-env
+	// After/Every sugar call them by name (like NetInvoke and the event pair) and LuaManager keeps
+	// them out of the documented Lot table. The callback for a timer never crosses this boundary
+	// — it stays in the bootstrap's timerFnRegistry and is reached through __openlot_callTimer.
+
+	/// <summary>Schedules one tween (bootstrap sugar only). Returns the id a cancel token uses,
+	/// or -1 when it was refused (unknown kind/easing, bad target, full schedule).</summary>
+	public int ScheduleTween(int handle, string kind, float a, float b, float c, float d,
+		float duration, string easing)
+	{
+		if (_scene == null || _scene.Scheduler == null) return -1;
+		return _scene.Scheduler.ScheduleTween(handle, kind, a, b, c, d, duration, easing);
+	}
+
+	/// <summary>Schedules one timer (bootstrap sugar only). Returns the id a cancel token uses,
+	/// or -1 when the schedule is full.</summary>
+	public int ScheduleTimer(int handle, float delay, bool repeating, float interval)
+	{
+		if (_scene == null || _scene.Scheduler == null) return -1;
+		return _scene.Scheduler.ScheduleTimer(handle, delay, repeating, interval);
+	}
+
+	/// <summary>Cancels one scheduled tween/timer by id (bootstrap tokens only). False when it is
+	/// already gone — tokens stay harmless no-ops after completion.</summary>
+	public bool CancelScheduled(int id)
+	{
+		if (_scene == null || _scene.Scheduler == null) return false;
+		return _scene.Scheduler.Cancel(id);
+	}
+
 	// --- internals ---
 
 	private int Spawn3D(LotObjectKind kind, Vector3 at)

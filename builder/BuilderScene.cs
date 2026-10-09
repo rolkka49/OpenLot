@@ -63,6 +63,7 @@ public partial class BuilderScene : Node3D
 	private bool _editorSuiteDone;
 	private bool _constraintSuiteDone;
 	private bool _eventSuiteDone;
+	private bool _tweenSuiteDone;
 
 	/// <summary>
 	/// Heavy self-tests (a 20k-encode loop, an 8 MB out-of-memory, a ~10 MB allocation) run only when
@@ -134,6 +135,14 @@ public partial class BuilderScene : Node3D
 	/// </summary>
 	public LotEventRegistry Events { get; private set; }
 
+	/// <summary>
+	/// The lot's tween/timer scheduler (milestone 3.8): created in <see cref="_Ready"/> beside the
+	/// event registry (a script may schedule at load), wired to the scene's handle registry, the
+	/// current VM's bridge and the clamped UI-rect writer. Advanced by <see cref="ScriptRuntime.Tick"/>
+	/// while a session is active; cleared on every reload and on teardown.
+	/// </summary>
+	public LotScheduler Scheduler { get; private set; }
+
 	public override void _Ready()
 	{
 		// A fresh session starts from the all-collide default (§3.5); a loaded lot overwrites this
@@ -154,6 +163,18 @@ public partial class BuilderScene : Node3D
 		Events.DetachSensor = DetachEventSensor;
 		Events.SessionActive = () => InTestMode;
 		Events.Dispatch = DispatchEventToLua;
+
+		// Milestone 3.8: the tween/timer scheduler, wired to the handle registry (targets), the
+		// CURRENT VM's bridge (timer callbacks) and the clamped UI-rect writer, so a tween can no
+		// more leave the picture frame than a scripted SetUIRect can.
+		Scheduler = new LotScheduler(message => { LotLog.Warn("tween", message); GD.PushWarning(message); });
+		Scheduler.ResolveTarget = GetByHandle;
+		Scheduler.FireTimer = (handle, id, keep) =>
+		{
+			LuaNetBridge bridge = LuaManager.Instance.NetBridge;
+			return bridge != null && !bridge.IsDead && bridge.CallTimer(handle, id, keep);
+		};
+		Scheduler.ApplyUiRect = ApplyTweenUiRect;
 
 		SpawnDefaultLot();
 
@@ -220,7 +241,7 @@ public partial class BuilderScene : Node3D
 			// the Output window and the engine console from this one place.
 			message => { LotLog.Warn("script", message); GD.PushWarning(message); },
 			LuaManager.Instance.ProcessDeferredRecreate, () => LuaManager.Instance.ScriptingSuspended,
-			Events, () => InTestMode);
+			Events, () => InTestMode, Scheduler);
 		LuaScripts.LoadLot(LotRoot, EnsureEntityHandle, ReadScriptFile, DestroyEntity);
 	}
 
@@ -563,6 +584,17 @@ public partial class BuilderScene : Node3D
 		return bridge.TryDispatchEvent(subject, eventName, subscriber, other, playerId, fromPlayer);
 	}
 
+	/// <summary>Writes a tweened UI rect through the same clamp SetUIRect uses, so an animating
+	/// element can no more leave the picture frame than a scripted one can (milestone 3.8).</summary>
+	private void ApplyTweenUiRect(LotUIElement element, Vector2 position, Vector2 size)
+	{
+		Vector2 pos = position;
+		Vector2 sz = size;
+		UiGizmoMath.ClampRect(ref pos, ref sz, UiCanvasBounds);
+		element.Position = pos;
+		element.Size = sz;
+	}
+
 	/// <summary>Creates the player camera on first use and keeps it bound to the shared input
 	/// source. It lives in the lot viewport, a sibling of the freecam.</summary>
 	private void EnsurePlayerCamera()
@@ -692,6 +724,14 @@ public partial class BuilderScene : Node3D
 			EventSelfTest.Run(this);
 		}
 		EventSelfTest.TickProbe();
+		// The tween suite (milestone 3.8) runs after the event probe finishes: the staged probes
+		// drive Test mode one at a time.
+		if (!_tweenSuiteDone && EventSelfTest.ProbeDone)
+		{
+			_tweenSuiteDone = true;
+			TweenSelfTest.Run(this);
+		}
+		TweenSelfTest.TickProbe();
 #endif
 	}
 
@@ -722,7 +762,13 @@ public partial class BuilderScene : Node3D
 				"use --quit-after 500 when verifying headless)");
 		else if (!EventSelfTest.ProbeDone)
 			GD.PushWarning("[BuilderScene] event probe never finished (it needs ~2 s of wall-clock runtime after " +
-				"its suite, so give the run room: --quit-after 500 verified headless)");
+				"its suite, so give the run room: --quit-after 6000 verified headless)");
+		if (!_tweenSuiteDone)
+			GD.PushWarning("[BuilderScene] tween suite never ran (run ended before the event probe finished; " +
+				"use --quit-after 6000 when verifying headless)");
+		else if (!TweenSelfTest.ProbeDone)
+			GD.PushWarning("[BuilderScene] tween probe never finished (it needs ~2 s of wall-clock runtime after " +
+				"its suite, so give the run room: --quit-after 6000 verified headless)");
 #endif
 	}
 
@@ -1060,6 +1106,9 @@ public partial class BuilderScene : Node3D
 				// what it registered anywhere and what others registered on it (design doc D13) —
 				// and its sensor dies with the node.
 				if (Events != null) Events.ForgetEntity(handle);
+				// Tweens/timers (milestone 3.8): a destroyed entity cancels what it animated and
+				// what it timed.
+				if (Scheduler != null) Scheduler.ForgetEntity(handle);
 				// A constraint must never outlive a part it links (a joint whose body node is gone
 				// is a crash), so the records go first and the live joints follow them.
 				LotConstraints.RemoveFor(handle);

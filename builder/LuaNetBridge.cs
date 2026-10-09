@@ -602,6 +602,65 @@ public sealed class LuaNetBridge : IDispatchTarget
 		return LuaCall.CallBoolInt(_state, "__openlot_hasFrame", handle);
 	}
 
+	/// <summary>
+	/// Runs one scheduled timer callback as its own watchdog unit (milestone 3.8, design doc D2):
+	/// one armed unit, the shared 3-trip breaker, the same OOM policy as net and events. Returns
+	/// false when the callback no longer exists (the Lua-side registry lost it), so a repeating
+	/// timer can be dropped.
+	/// </summary>
+	public bool CallTimer(int handle, int id, bool keep)
+	{
+		ThrowIfDead();
+		if (_disabledEntities.Contains(handle)) return true;
+
+		bool handled;
+		bool tripped;
+		Watchdog?.ArmUnit(LuaWatchdog.DispatchInstructionBudget);
+		try
+		{
+			handled = InvokeTimer(handle, id, keep);
+		}
+		finally
+		{
+			tripped = Watchdog != null && Watchdog.EndUnit();
+		}
+		if (tripped) HandleEventTrip(handle, "timer");
+
+		if (MemoryGuard != null && MemoryGuard.ConsumeOomHit())
+		{
+			Warn("[Events] Lua out of memory in a timer callback on entity " + handle +
+				"; the lot VM will be rebuilt");
+			OomRecreateRequested?.Invoke();
+			return true;
+		}
+		return handled;
+	}
+
+	private bool InvokeTimer(int handle, int id, bool keep)
+	{
+		if (_state == null) return false;
+		int top = _state.GetTop();
+		try
+		{
+			_state.GetGlobal("__openlot_callTimer");
+			_state.PushInteger(handle);
+			_state.PushInteger(id);
+			_state.PushBoolean(keep);
+			KeraLua.LuaStatus status = _state.PCall(3, 1, 0);
+			if (status != KeraLua.LuaStatus.OK)
+			{
+				string error = _state.ToString(-1, false);
+				Warn("[Events] timer callback on entity " + handle + " errored: " + error);
+				return true;
+			}
+			return _state.ToBoolean(-1);
+		}
+		finally
+		{
+			_state.SetTop(top);
+		}
+	}
+
 	/// <summary>The script to blame for a trip on (handle, direction, name): the declaring script
 	/// from the router registry when known, else the entity's registered script, else "unknown".</summary>
 	private string TripScript(int handle, NetDirection direction, string name)

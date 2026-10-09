@@ -160,6 +160,9 @@ local entityScripts = {}
 -- crosses into C#. frameFunctions holds each entity's captured onFrame (handle -> function).
 local eventRegistry = {}
 local frameFunctions = {}
+-- Timer callbacks (milestone 3.8): per-env subscriptions, handle -> id -> function. Kept here so
+-- the scheduler's C# side never holds a Lua function (it calls __openlot_callTimer by id).
+local timerFnRegistry = {}
 
 -- --- watchdog state (armed/cleared from C#; the hook itself lives here) ---
 local tripped = false
@@ -227,6 +230,7 @@ function __openlot_forgetEntity(handle)
     disabledEntities[handle] = nil
     entityScripts[handle] = nil
     frameFunctions[handle] = nil
+    timerFnRegistry[handle] = nil
     -- Handlers watching this entity (it as the subject) and handlers it registered on others
     -- (it as a subscriber) go through one walk, so a destroyed entity leaves nothing behind in
     -- either direction (design doc D13). Empty lists and subjects are pruned as we go; the outer
@@ -260,6 +264,22 @@ function __openlot_callFrame(handle, delta)
     if not ok then error(err, 0) end
     return true
 end
+-- Timer callback entry (milestone 3.8): the C# scheduler calls this by id. A one-shot clears its
+-- Lua-side registration before running (keep == false), a repeating timer keeps it; a missing
+-- registration returns false so the scheduler drops the entry.
+function __openlot_callTimer(handle, id, keep)
+    local list = timerFnRegistry[handle]
+    local fn = list ~= nil and list[id] or nil
+    if fn == nil then return false end
+    if not keep then
+        list[id] = nil
+        if next(list) == nil then timerFnRegistry[handle] = nil end
+    end
+    if disabledEntities[handle] then return true end
+    local ok, err = raw_pcall(fn)
+    if not ok then error(err, 0) end
+    return true
+end
 -- Item 6: a (re)load is a clean slate. Clearing the registries up front stops a re-run from seeing
 -- a previous load's declarations, disabled flags or script names (the C# side clears its mirror).
 -- Cleared IN PLACE (not reassigned) so the upvalue identities makeNet's proxies captured stay
@@ -270,6 +290,7 @@ function __openlot_resetRegistries()
     for key in next, entityScripts do entityScripts[key] = nil end
     for key in next, eventRegistry do eventRegistry[key] = nil end
     for key in next, frameFunctions do frameFunctions[key] = nil end
+    for key in next, timerFnRegistry do timerFnRegistry[key] = nil end
 end
 
 -- --- validation pre-pass (v4 A6): runs in the routing closure BEFORE NetInvoke, iterating with
@@ -493,6 +514,54 @@ function __openlot_dispatchEvent(subject, eventName, subscriber, other, playerId
     return handled
 end
 
+-- --- tweens and timers (milestone 3.8) ---
+-- Tween sugar: five verb-shaped wrappers over one packed plumbing call, each returning a cancel
+-- token (the same shape Subscribe returns). Easing names are validated here so a typo raises in
+-- the calling script instead of scheduling something wrong.
+local EASINGS = { linear = true, sineIn = true, sineOut = true, sineInOut = true,
+    quadIn = true, quadOut = true, quadInOut = true, cubicIn = true, cubicOut = true, cubicInOut = true }
+
+local function scheduleTweenToken(verb, kind, handle, a, b, c, d, duration, easing)
+    if type(handle) ~= "number" then error(verb .. ": the target must be an entity handle", 2) end
+    if type(a) ~= "number" or type(b) ~= "number" or type(c) ~= "number" or type(d) ~= "number" then
+        error(verb .. ": the value must be numbers", 2)
+    end
+    if type(duration) ~= "number" or duration < 0 then
+        error(verb .. ": duration must be a number >= 0", 2)
+    end
+    if easing == nil then easing = "linear" end
+    if type(easing) ~= "string" or not EASINGS[easing] then
+        error(verb .. ": unknown easing '" .. tostring(easing) .. "'", 2)
+    end
+    local id = ScheduleTween(handle, kind, a, b, c, d, duration, easing)
+    if id < 0 then return function() return false end end
+    return function() return CancelScheduled(id) end
+end
+
+-- Per-env timer sugar: After(seconds, fn) fires once, Every(seconds, fn) repeats. The subscriber
+-- identity is the env's handle, so destroying the entity cancels its timers in one sweep.
+local function makeTimer(handle, repeating)
+    local verb = repeating and "Every" or "After"
+    return function(seconds, fn)
+        if type(seconds) ~= "number" or seconds < 0 then
+            error(verb .. ": the seconds must be a number >= 0", 2)
+        end
+        if type(fn) ~= "function" then
+            error(verb .. ": the callback must be a function", 2)
+        end
+        local id = ScheduleTimer(handle, seconds, repeating, seconds)
+        if id < 0 then return function() return false end end
+        local byHandle = timerFnRegistry[handle]
+        if byHandle == nil then byHandle = {}; timerFnRegistry[handle] = byHandle end
+        byHandle[id] = fn
+        return function()
+            local list = timerFnRegistry[handle]
+            if list ~= nil then list[id] = nil end
+            return CancelScheduled(id)
+        end
+    end
+end
+
 function __openlot_dispatch(handle, direction, name, sender, fromPlayer, args)
     local registry = netRegistry[handle]
     if registry == nil or disabledEntities[handle] then return false end
@@ -519,6 +588,10 @@ function __openlot_newEnv(handle)
     -- real for two scripts on one entity.
     local owner = {}
     rawset_priv(env, "Subscribe", makeSubscribe(handle, owner))
+    -- Timer sugar (milestone 3.8): After/Every are per-env for the same reason Subscribe is —
+    -- the subscriber identity is this env's handle.
+    rawset_priv(env, "After", makeTimer(handle, false))
+    rawset_priv(env, "Every", makeTimer(handle, true))
     rawset_priv(env, "this", setmetatable({}, {
         __index = { Handle = handle },
         __newindex = function() error("this is read-only", 2) end,
@@ -623,6 +696,23 @@ local sandbox = {
     Lot = readonlyLib("Lot", Lot, {
         CallServer = function(handle, name, ...) return crossEntityCall(CallServer, handle, name, ...) end,
         CallClient = function(handle, name, ...) return crossEntityCall(CallClient, handle, name, ...) end,
+        -- Tween verbs (milestone 3.8): validated wrappers over the packed ScheduleTween plumbing,
+        -- each returning a cancel token.
+        TweenPosition = function(handle, x, y, z, duration, easing)
+            return scheduleTweenToken("TweenPosition", "position", handle, x, y, z, 0, duration, easing)
+        end,
+        TweenRotation = function(handle, x, y, z, duration, easing)
+            return scheduleTweenToken("TweenRotation", "rotation", handle, x, y, z, 0, duration, easing)
+        end,
+        TweenScale = function(handle, x, y, z, duration, easing)
+            return scheduleTweenToken("TweenScale", "scale", handle, x, y, z, 0, duration, easing)
+        end,
+        TweenColor = function(handle, r, g, b, a, duration, easing)
+            return scheduleTweenToken("TweenColor", "color", handle, r, g, b, a, duration, easing)
+        end,
+        TweenUIRect = function(handle, x, y, w, h, duration, easing)
+            return scheduleTweenToken("TweenUIRect", "rect", handle, x, y, w, h, duration, easing)
+        end,
     }),
     log = function(message) return Lot.Log(tostring(message)) end,
     -- print is Lua's own verb, rebuilt as a varargs alias of log (the native one is stripped from
