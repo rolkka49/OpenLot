@@ -87,6 +87,18 @@ public partial class LotObject : Node3D
 	/// or not it is collidable.</summary>
 	public const uint EditorPickMask = LotCollisionGroups.PickMask;
 
+	/// <summary>Godot's own default friction — declaring the override must not change an existing
+	/// part, so a part whose values are both defaults carries no material resource at all.</summary>
+	public const float DefaultFriction = 1f;
+
+	/// <summary>Godot's own default bounce (none). See <see cref="DefaultFriction"/>.</summary>
+	public const float DefaultBounce = 0f;
+
+	/// <summary>Smallest explicit mass <see cref="SetMass"/> accepts; 0 always means "auto"
+	/// (<see cref="MassForBody"/>), and a smaller positive value would be a physics-stability
+	/// hazard rather than a meaningful weight.</summary>
+	public const float MinExplicitMass = 0.01f;
+
 	// Selection blue matches LotUIElement's outline so 3D and UI selections read the same.
 	private static readonly Color OutlineSelectedColor = new Color(0.18f, 0.52f, 0.89f, 1f);
 	private static readonly Color OutlineDraggedColor = new Color(0.35f, 0.72f, 1.0f, 1f);
@@ -148,6 +160,18 @@ public partial class LotObject : Node3D
 	/// </summary>
 	public string CollisionGroup { get { return _collisionGroup; } }
 
+	/// <summary>Surface friction of the part's collision body (milestone 3.11, default 1). See
+	/// <see cref="SetFriction"/>.</summary>
+	public float Friction { get { return _friction; } }
+
+	/// <summary>Bounciness of the part's collision body (milestone 3.11, clamped 0..1, default 0).
+	/// See <see cref="SetBounce"/>.</summary>
+	public float Bounce { get { return _bounce; } }
+
+	/// <summary>Explicit mass, or 0 for "derive it from the mesh's volume" — see
+	/// <see cref="MassForBody"/>.</summary>
+	public float Mass { get { return _mass; } }
+
 	/// <summary>
 	/// Opaque asset id of the part's texture (<see cref="LotTextureCache"/>), or "" for none.
 	/// Kept as a string so it can be persisted in the §8.1 lot format and handed to Lua without
@@ -160,6 +184,15 @@ public partial class LotObject : Node3D
 	private string _collisionGroup = LotCollisionGroups.DefaultGroup;
 	private string _textureId = "";
 	private bool _simulated;
+
+	// Physics material state (milestone 3.11): friction/bounce carried by the part's collision body,
+	// and an explicit mass (0 = derive from the mesh's volume, §3.6's rule). Defaults are Godot's own
+	// (friction 1, bounce 0), so an untouched part is unchanged — and no material resource is created
+	// until a value actually differs (ApplyPhysicsMaterial).
+	private float _friction = DefaultFriction;
+	private float _bounce = DefaultBounce;
+	private float _mass;
+	private PhysicsMaterial _physicsMaterial;
 
 	// Decal state (milestone 2.6). Face, offset and scale are the authored values; the node's own
 	// Transform is derived from them against the host (RefreshDecalTransform). The image reuses
@@ -344,6 +377,9 @@ public partial class LotObject : Node3D
 		// matrix real once dynamic bodies exist. CanCollide is applied through RefreshCollision.
 		body.CollisionLayer = LotCollisionGroups.BitForName(_collisionGroup);
 		body.CollisionMask = LotCollisionGroups.MaskForName(_collisionGroup);
+		// Milestone 3.11: friction/bounce ride on the body (nothing changes while both values are
+		// Godot's defaults — ApplyPhysicsMaterial only allocates a material once one differs).
+		ApplyPhysicsMaterial(body);
 		body.SetMeta(InternalChildMeta, true);
 
 		CollisionShape3D shape = new CollisionShape3D();
@@ -415,6 +451,84 @@ public partial class LotObject : Node3D
 			? LotCollisionGroups.BitForName(_collisionGroup)
 			: NoCollideLayer;
 		CollisionBody.CollisionMask = LotCollisionGroups.MaskForName(_collisionGroup);
+	}
+
+	// --- Physics material (milestone 3.11) ---
+
+	/// <summary>
+	/// Sets the surface friction (clamped at 0; higher = grippier). Applied to the live body
+	/// immediately — build-mode and simulated alike — through the part's shared material. The
+	/// default is Godot's own (1), so an untouched part behaves exactly as it did before this
+	/// milestone.
+	/// </summary>
+	public void SetFriction(float value)
+	{
+		_friction = Mathf.Max(0f, value);
+		RefreshPhysicsMaterial();
+	}
+
+	/// <summary>Sets the bounciness (clamped into 0..1). Reaches the body exactly like
+	/// <see cref="SetFriction"/> does.</summary>
+	public void SetBounce(float value)
+	{
+		_bounce = Mathf.Clamp(value, 0f, 1f);
+		RefreshPhysicsMaterial();
+	}
+
+	/// <summary>
+	/// Sets the explicit mass. 0 (or anything below 0) means "auto": the mass is derived from the
+	/// mesh's volume — the rule §3.6's body swap has always used. A positive value overrides it,
+	/// floored at <see cref="MinExplicitMass"/>, and a live simulated body picks the change up
+	/// immediately.
+	/// </summary>
+	public void SetMass(float value)
+	{
+		_mass = value <= 0f ? 0f : Mathf.Max(MinExplicitMass, value);
+		RigidBody3D rigid = CollisionBody as RigidBody3D;
+		if (rigid != null && GodotObject.IsInstanceValid(rigid)) rigid.Mass = MassForBody();
+	}
+
+	/// <summary>The mass a simulated body should carry: the explicit <see cref="Mass"/> when set,
+	/// otherwise the mesh-volume estimate (§3.6). One rule, used by the body swap and by the tests
+	/// alike.</summary>
+	public float MassForBody()
+	{
+		return _mass > 0f ? _mass : EstimateMass();
+	}
+
+	/// <summary>
+	/// Applies the part's friction/bounce to a body. Both of the part's body forms (static and
+	/// simulated) get the same small per-part material, so a body swap cannot lose the values and a
+	/// live edit updates whichever body is current. While both values equal Godot's defaults the
+	/// override is cleared instead — a part that never asked for custom material allocates nothing.
+	/// </summary>
+	public void ApplyPhysicsMaterial(PhysicsBody3D body)
+	{
+		if (body == null || !GodotObject.IsInstanceValid(body)) return;
+
+		PhysicsMaterial material = null;
+		if (_friction != DefaultFriction || _bounce != DefaultBounce)
+		{
+			if (_physicsMaterial == null) _physicsMaterial = new PhysicsMaterial();
+			_physicsMaterial.Friction = _friction;
+			_physicsMaterial.Bounce = _bounce;
+			material = _physicsMaterial;
+		}
+
+		// GodotSharp declares the property on each CONCRETE body type (StaticBody3D / RigidBody3D),
+		// not on their shared PhysicsBody3D base, so the assignment goes through exactly the two
+		// forms this part ever has. Both accept it — an anchored part's floor carries its
+		// friction/bounce as fully as a simulated part does, and the engine combines the two
+		// materials of a contact.
+		if (body is RigidBody3D rigid) rigid.PhysicsMaterialOverride = material;
+		else if (body is StaticBody3D staticBody) staticBody.PhysicsMaterialOverride = material;
+	}
+
+	/// <summary>Updates the live body after a friction/bounce edit (a no-op on a part with no body,
+	/// e.g. a decal).</summary>
+	private void RefreshPhysicsMaterial()
+	{
+		ApplyPhysicsMaterial(CollisionBody);
 	}
 
 	// --- Decal state (milestone 2.6) ---
@@ -724,7 +838,8 @@ public partial class LotObject : Node3D
 		if (simulated)
 		{
 			RigidBody3D rigid = new RigidBody3D();
-			rigid.Mass = EstimateMass();
+			// Milestone 3.11: an explicit mass wins over the §3.6 volume estimate (MassForBody).
+			rigid.Mass = MassForBody();
 			// Sleeping is what keeps a resting assembly from costing anything; the engine wakes a
 			// body the moment something touches or constrains it.
 			rigid.CanSleep = true;
@@ -748,6 +863,9 @@ public partial class LotObject : Node3D
 		newParent.AddChild(newBody);
 		newBody.AddChild(CollisionShape);
 		newBody.GlobalTransform = bodyWorld; // the swap must not move anything
+		// Milestone 3.11: the material follows the swap, so friction/bounce are identical in both
+		// body forms (and an explicit mass just came along on the rigid branch above).
+		ApplyPhysicsMaterial(newBody);
 		CollisionBody = newBody;
 		oldBody.Free();
 

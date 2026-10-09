@@ -125,7 +125,14 @@ public class LuaManager
 			_bridge.Warning = GD.PushWarning;
 			_bridge.OomRecreateRequested = RequestRecreate;
 			_bridge.EnableOfflineNet();
-			if (api != null) api.Net = _bridge;
+			if (api != null)
+			{
+				api.Net = _bridge;
+				// Milestone 3.11: the API mints Raycast hit tables through the state it is bound to
+				// (NLua can only build a Lua table via its own state — a returned Dictionary hands
+				// Lua opaque userdata). A VM rebuild re-runs Initialize, so the reference follows.
+				api.Lua = state;
+			}
 
 			_state = state;
 			LastError = "";

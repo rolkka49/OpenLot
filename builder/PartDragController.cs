@@ -562,6 +562,43 @@ public sealed class PartDragController
 	}
 
 	/// <summary>
+	/// The distance-parameter form of the pick query for the bound physics API (§3.11): same lot
+	/// world, same mask and same bodies-only filtering as <see cref="Pick"/>, but with a
+	/// caller-chosen distance and the raw hit reported (collider included) instead of being
+	/// resolved to a part here — the caller resolves the collider its own way, because a simulated
+	/// part's body lives at the lot root and a walk up its parents would never find the part.
+	///
+	/// The direction is normalized, so <paramref name="maxDistance"/> is always metres along it.
+	/// Returns false for a zero direction, a missing physics world or an empty ray. Static and
+	/// internal so both the bound API and the DEBUG self-tests exercise this exact query.
+	/// </summary>
+	internal static bool Raycast(BuilderScene scene, Vector3 origin, Vector3 direction, float maxDistance,
+		out Vector3 hitPosition, out Vector3 hitNormal, out Node hitCollider)
+	{
+		hitPosition = Vector3.Zero;
+		hitNormal = Vector3.Zero;
+		hitCollider = null;
+		if (scene == null || direction.LengthSquared() < 1e-8f || maxDistance <= 0f) return false;
+
+		World3D world = scene.LotRoot.GetWorld3D();
+		PhysicsDirectSpaceState3D space = world != null ? world.DirectSpaceState : null;
+		if (space == null) return false;
+
+		PhysicsRayQueryParameters3D query = PhysicsRayQueryParameters3D.Create(
+			origin, origin + direction.Normalized() * maxDistance, LotObject.EditorPickMask);
+		query.CollideWithAreas = false;
+		query.CollideWithBodies = true;
+
+		Godot.Collections.Dictionary result = space.IntersectRay(query);
+		if (result.Count == 0) return false;
+
+		hitPosition = (Vector3)result["position"];
+		hitNormal = result.ContainsKey("normal") ? (Vector3)result["normal"] : Vector3.Zero;
+		hitCollider = result["collider"].As<Node>();
+		return true;
+	}
+
+	/// <summary>
 	/// Raycasts the lot physics space and returns the nearest part, if any. Static and internal so
 	/// the DEBUG self-test can exercise the real pick path against a live physics space.
 	///

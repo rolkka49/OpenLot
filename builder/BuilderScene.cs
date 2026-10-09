@@ -66,6 +66,7 @@ public partial class BuilderScene : Node3D
 	private bool _tweenSuiteDone;
 	private bool _inputSuiteDone;
 	private bool _cameraSuiteDone;
+	private bool _physicsSuiteDone;
 
 	/// <summary>
 	/// Heavy self-tests (a 20k-encode loop, an 8 MB out-of-memory, a ~10 MB allocation) run only when
@@ -558,12 +559,13 @@ public partial class BuilderScene : Node3D
 		Events.Enqueue(subject, eventName, other, fromPlayer, playerId);
 	}
 
-	/// <summary>The entity handle a touched physics body belongs to: the player's invisible body
-	/// resolves to the session's character, a simulated body carries its owner in meta (it lives
-	/// at the lot root, away from its part), and any other body is found by walking up to the
-	/// nearest node with a handle — which is what collapses internal collision bodies onto the
-	/// part that owns them.</summary>
-	private int ResolveBodyEntity(Node body)
+	/// <summary>The entity handle a physics body belongs to: the player's invisible body resolves
+	/// to the session's character, a simulated body carries its owner in meta (it lives at the lot
+	/// root, away from its part), and any other body is found by walking up to the nearest node
+	/// with a handle — which is what collapses internal collision bodies onto the part that owns
+	/// them. Internal because the bound physics API resolves raycast hits with the same rules
+	/// (§3.11: a root-hosted simulated body must name its entity there too).</summary>
+	internal int ResolveBodyEntity(Node body)
 	{
 		if (body == null || !GodotObject.IsInstanceValid(body)) return -1;
 		if (Player != null && Player.OwnsBody(body))
@@ -819,6 +821,13 @@ public partial class BuilderScene : Node3D
 			CameraSelfTest.Run(this);
 		}
 		CameraSelfTest.TickProbe();
+		// The physics suite (milestone 3.11) runs after the camera probe finishes.
+		if (!_physicsSuiteDone && CameraSelfTest.ProbeDone)
+		{
+			_physicsSuiteDone = true;
+			PhysicsSelfTest.Run(this);
+		}
+		PhysicsSelfTest.TickProbe();
 #endif
 	}
 
@@ -849,25 +858,31 @@ public partial class BuilderScene : Node3D
 				"use --quit-after 500 when verifying headless)");
 		else if (!EventSelfTest.ProbeDone)
 			GD.PushWarning("[BuilderScene] event probe never finished (it needs ~2 s of wall-clock runtime after " +
-				"its suite, so give the run room: --quit-after 6000 verified headless)");
+				"its suite, so give the run room: --quit-after 8000 verified headless)");
 		if (!_tweenSuiteDone)
 			GD.PushWarning("[BuilderScene] tween suite never ran (run ended before the event probe finished; " +
-				"use --quit-after 6000 when verifying headless)");
+				"use --quit-after 8000 when verifying headless)");
 		else if (!TweenSelfTest.ProbeDone)
 			GD.PushWarning("[BuilderScene] tween probe never finished (it needs ~2 s of wall-clock runtime after " +
-				"its suite, so give the run room: --quit-after 6000 verified headless)");
+				"its suite, so give the run room: --quit-after 8000 verified headless)");
 		if (!_inputSuiteDone)
 			GD.PushWarning("[BuilderScene] input suite never ran (run ended before the tween probe finished; " +
-				"use --quit-after 6000 when verifying headless)");
+				"use --quit-after 8000 when verifying headless)");
 		else if (!InputSelfTest.ProbeDone)
 			GD.PushWarning("[BuilderScene] input probe never finished (it needs ~2 s of wall-clock runtime after " +
-				"its suite, so give the run room: --quit-after 6000 verified headless)");
+				"its suite, so give the run room: --quit-after 8000 verified headless)");
 		if (!_cameraSuiteDone)
 			GD.PushWarning("[BuilderScene] camera suite never ran (run ended before the input probe finished; " +
-				"use --quit-after 6000 when verifying headless)");
+				"use --quit-after 8000 when verifying headless)");
 		else if (!CameraSelfTest.ProbeDone)
 			GD.PushWarning("[BuilderScene] camera probe never finished (it needs ~3 s of wall-clock runtime after " +
-				"its suite, so give the run room: --quit-after 6000 verified headless)");
+				"its suite, so give the run room: --quit-after 8000 verified headless)");
+		if (!_physicsSuiteDone)
+			GD.PushWarning("[BuilderScene] physics suite never ran (run ended before the camera probe finished; " +
+				"use --quit-after 8000 when verifying headless)");
+		else if (!PhysicsSelfTest.ProbeDone)
+			GD.PushWarning("[BuilderScene] physics probe never finished (it needs ~3.5 s of wall-clock runtime after " +
+				"its suite, so give the run room: --quit-after 8000 verified headless)");
 #endif
 	}
 

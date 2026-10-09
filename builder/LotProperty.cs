@@ -158,8 +158,7 @@ public static class LotPropertyRegistry
 	/// one-liner.
 	///
 	/// Reserved ids for later milestones, deliberately NOT declared yet so nothing speculative
-	/// appears in the Inspector: friction / bounciness / mass (§3.11), spawn / team / checkpoint
-	/// (§12.8).
+	/// appears in the Inspector: spawn / team / checkpoint (§14.8).
 	/// </summary>
 	private static void RegisterCore()
 	{
@@ -216,6 +215,54 @@ public static class LotPropertyRegistry
 			ListOptions = () => LotCollisionGroups.Names,
 			GetChoice = node => ((LotObject)node).CollisionGroup,
 			SetChoice = (node, value) => ((LotObject)node).SetCollisionGroup(value)
+		});
+
+		// --- Physics material (milestone 3.11) ---
+		// Three numbers the bodies §3.6 swapped in already respect; declared here so the Inspector
+		// and the Lua verbs share one vocabulary, and so lot.json / the session snapshot carry
+		// them for free. The defaults reproduce the pre-3.11 behaviour exactly: Godot's own
+		// friction 1 and bounce 0, and mass 0 = "derive it from the mesh's volume" (the §3.6 rule).
+
+		Register(new LotPropertyDescriptor
+		{
+			Id = "friction",
+			DisplayName = "Friction",
+			Kind = LotPropertyKind.Float,
+			Category = "Physics",
+			Doc = "How grippy the part's surface is (0 = slippery, 1 = Godot's default). Applies " +
+				"to the part's collision body, in the editor and in play alike.",
+			AppliesTo = IsPart,
+			Speed = 0.01f,
+			GetFloat = node => ((LotObject)node).Friction,
+			SetFloat = (node, value) => ((LotObject)node).SetFriction(value)
+		});
+
+		Register(new LotPropertyDescriptor
+		{
+			Id = "bounce",
+			DisplayName = "Bounce",
+			Kind = LotPropertyKind.Float,
+			Category = "Physics",
+			Doc = "How bouncy the part is (0 = dead, 1 = fully elastic). Applies to the part's " +
+				"collision body, in the editor and in play alike.",
+			AppliesTo = IsPart,
+			Speed = 0.01f,
+			GetFloat = node => ((LotObject)node).Bounce,
+			SetFloat = (node, value) => ((LotObject)node).SetBounce(value)
+		});
+
+		Register(new LotPropertyDescriptor
+		{
+			Id = "mass",
+			DisplayName = "Mass",
+			Kind = LotPropertyKind.Float,
+			Category = "Physics",
+			Doc = "The part's weight in play. 0 = auto: derived from the part's size, which is " +
+				"what every part did before this property existed. Impulses divide by it.",
+			AppliesTo = IsPart,
+			Speed = 0.05f,
+			GetFloat = node => ((LotObject)node).Mass,
+			SetFloat = (node, value) => ((LotObject)node).SetMass(value)
 		});
 
 		// --- Decal properties (milestone 2.6) ---

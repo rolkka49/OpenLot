@@ -133,8 +133,9 @@ public static class LotPropertySelfTest
 
 			List<LotPropertyDescriptor> buffer = new List<LotPropertyDescriptor>();
 			LotPropertyRegistry.CollectFor(part, buffer);
-			// anchored / canCollide / texture (milestone 2.3) plus collisionGroup (milestone 3.5).
-			Check("part: all four core properties apply", buffer.Count == 4);
+			// anchored / canCollide / texture (milestone 2.3), collisionGroup (milestone 3.5) and
+			// friction / bounce / mass (milestone 3.11).
+			Check("part: all seven core properties apply", buffer.Count == 7);
 
 			// The Inspector reads through the descriptor and writes through its SetBool.
 			LotPropertyDescriptor anchored = LotPropertyRegistry.Find("anchored");
