@@ -62,6 +62,7 @@ public partial class BuilderScene : Node3D
 	private bool _integrationSuiteDone;
 	private bool _editorSuiteDone;
 	private bool _constraintSuiteDone;
+	private bool _eventSuiteDone;
 
 	/// <summary>
 	/// Heavy self-tests (a 20k-encode loop, an 8 MB out-of-memory, a ~10 MB allocation) run only when
@@ -123,6 +124,16 @@ public partial class BuilderScene : Node3D
 	private readonly Dictionary<int, Node> _handles = new Dictionary<int, Node>();
 	private int _nextHandle = 1;
 
+	/// <summary>
+	/// The lot's event registry (milestone 3.7): subscriptions, the per-frame delivery queue and
+	/// the sensor bookkeeping. Created in <see cref="_Ready"/> before any script runs (a script may
+	/// Subscribe at load) and wired to the scene — sensors live on lot parts, dispatch goes to the
+	/// current VM's bridge, and the session gate is <see cref="InTestMode"/> (design doc D1). It is
+	/// cleared with every script reload and on teardown, so nothing survives the world it belonged
+	/// to.
+	/// </summary>
+	public LotEventRegistry Events { get; private set; }
+
 	public override void _Ready()
 	{
 		// A fresh session starts from the all-collide default (§3.5); a loaded lot overwrites this
@@ -133,6 +144,17 @@ public partial class BuilderScene : Node3D
 		RegisterLotRootHandle();
 		Api = new LotLuaApi(this);
 		LuaManager.Instance.Initialize(Api);
+
+		// Milestone 3.7: the event registry exists before any script runs, because a script may
+		// Subscribe while it loads. Its hooks are the scene's: sensors are attached to lot parts,
+		// dispatch goes to the CURRENT VM's bridge (resolved per call — a VM rebuild replaces it),
+		// and the session gate is InTestMode (design doc D1).
+		Events = new LotEventRegistry(message => { LotLog.Warn("events", message); GD.PushWarning(message); });
+		Events.AttachSensor = AttachEventSensor;
+		Events.DetachSensor = DetachEventSensor;
+		Events.SessionActive = () => InTestMode;
+		Events.Dispatch = DispatchEventToLua;
+
 		SpawnDefaultLot();
 
 		// Handle coverage before any script runs, so a script can address any other entity
@@ -197,7 +219,8 @@ public partial class BuilderScene : Node3D
 			// Every script-runtime diagnostic (load failures, dispatch errors, quarantines) reaches
 			// the Output window and the engine console from this one place.
 			message => { LotLog.Warn("script", message); GD.PushWarning(message); },
-			LuaManager.Instance.ProcessDeferredRecreate, () => LuaManager.Instance.ScriptingSuspended);
+			LuaManager.Instance.ProcessDeferredRecreate, () => LuaManager.Instance.ScriptingSuspended,
+			Events, () => InTestMode);
 		LuaScripts.LoadLot(LotRoot, EnsureEntityHandle, ReadScriptFile, DestroyEntity);
 	}
 
@@ -360,6 +383,10 @@ public partial class BuilderScene : Node3D
 		// and they must exist even when the Lua runtime is unavailable (in which case the call above
 		// no-ops). Scripts have loaded by now, so script-spawned parts are in the tree to swap.
 		RebuildConstraints();
+		// Milestone 3.7: the session's sensors attach on the first frame tick — OnSessionStarted
+		// marks every subscribed subject pending and the part nodes exist by now (the drain retries
+		// a subject whose node appears later).
+		if (Events != null) Events.OnSessionStarted();
 
 		EnsurePlayerCamera();
 		if (Player == null) Player = new CapsuleController(this);
@@ -396,6 +423,9 @@ public partial class BuilderScene : Node3D
 		if (!InTestMode) return;
 		InTestMode = false;
 		InGameMode = false;
+		// Milestone 3.7: sensors are session artifacts — they come down with the session, before
+		// the reload below re-runs the scripts (and the reload clears the registries anyway).
+		if (Events != null) Events.OnSessionEnded();
 
 		if (Player != null) Player.Detach();
 		if (PlayerCamera != null) PlayerCamera.Current = false;
@@ -427,6 +457,110 @@ public partial class BuilderScene : Node3D
 			if (obj.Kind == LotObjectKind.Capsule) return obj;
 		}
 		return null;
+	}
+
+	// --- Events (milestone 3.7) -----------------------------------------------------------------
+
+	/// <summary>Creates (or finds) the subject part's event sensor. Retry when the handle does not
+	/// resolve yet — the subject may be spawned later in the session — and Refused when the node
+	/// cannot host one (a decal, a mesh-less group), so the registry reports it instead of failing
+	/// silently (design doc D10).</summary>
+	private SensorAttachResult AttachEventSensor(int subjectHandle)
+	{
+		Node node = GetByHandle(subjectHandle);
+		if (node == null) return SensorAttachResult.Retry;
+		LotObject part = node as LotObject;
+		if (part == null) return SensorAttachResult.Refused;
+		return part.EnsureEventSensor(OnEventSensorBodyEntered, OnEventSensorBodyExited)
+			? SensorAttachResult.Ok
+			: SensorAttachResult.Refused;
+	}
+
+	private void DetachEventSensor(int subjectHandle)
+	{
+		LotObject part = GetByHandle(subjectHandle) as LotObject;
+		if (part != null) part.ReleaseEventSensor();
+	}
+
+	private void OnEventSensorBodyEntered(LotObject owner, Node3D body)
+	{
+		EnqueueSensorContact(owner, body, "touched");
+	}
+
+	private void OnEventSensorBodyExited(LotObject owner, Node3D body)
+	{
+		EnqueueSensorContact(owner, body, "touchEnded");
+	}
+
+	/// <summary>
+	/// Turns one sensor contact into a queued delivery: the sensor's owner is the subject, the
+	/// other body resolves to its entity, and the local character's body attributes the contact to
+	/// the player (design doc D14). Nothing runs in Lua here — the delivery waits for the frame
+	/// tick (design doc D6), and it is dropped outside a session because sensors are session
+	/// artifacts.
+	/// </summary>
+	private void EnqueueSensorContact(LotObject owner, Node3D body, string eventName)
+	{
+		if (Events == null || !InTestMode) return;
+		int subject = HandleOf(owner);
+		if (subject < 0) return;
+		int other = ResolveBodyEntity(body);
+		if (other < 0 || other == subject) return;
+		bool fromPlayer = Player != null && Player.OwnsBody(body);
+		// A character contributes ONE contact (design doc D14): the hidden player body is the
+		// canonical source, so the visual capsule's own static collider — a shadow of the same
+		// entity — is skipped even though it resolves to the same handle.
+		if (!fromPlayer && Player != null && Player.Character != null && other == HandleOf(Player.Character)) return;
+		int playerId = -1;
+		if (fromPlayer)
+		{
+			// The transport owns identity (§8.2): never a hardcoded peer id.
+			LuaNetBridge bridge = LuaManager.Instance.NetBridge;
+			playerId = bridge != null && bridge.Router != null ? bridge.Router.LocalPeerId : 1;
+		}
+		Events.Enqueue(subject, eventName, other, fromPlayer, playerId);
+	}
+
+	/// <summary>The entity handle a touched physics body belongs to: the player's invisible body
+	/// resolves to the session's character, a simulated body carries its owner in meta (it lives
+	/// at the lot root, away from its part), and any other body is found by walking up to the
+	/// nearest node with a handle — which is what collapses internal collision bodies onto the
+	/// part that owns them.</summary>
+	private int ResolveBodyEntity(Node body)
+	{
+		if (body == null || !GodotObject.IsInstanceValid(body)) return -1;
+		if (Player != null && Player.OwnsBody(body))
+		{
+			LotObject character = Player.Character;
+			return character != null ? HandleOf(character) : -1;
+		}
+		if (body.HasMeta(LotObject.SimulatedOwnerMeta))
+			return body.GetMeta(LotObject.SimulatedOwnerMeta).AsInt32();
+		Node node = body;
+		while (node != null)
+		{
+			if (node.HasMeta(HandleMeta)) return node.GetMeta(HandleMeta).AsInt32();
+			node = node.GetParent();
+		}
+		return -1;
+	}
+
+	/// <summary>A node's registry handle, or -1 (the event layer's one handle lookup; HasMeta
+	/// first, because GetMeta(name, default) logs a Godot error for a missing key).</summary>
+	private static int HandleOf(Node node)
+	{
+		if (node == null || !GodotObject.IsInstanceValid(node) || !node.HasMeta(HandleMeta)) return -1;
+		return node.GetMeta(HandleMeta).AsInt32();
+	}
+
+	/// <summary>Delivers a queued event to one subscriber through the CURRENT VM's bridge — a
+	/// resolver, not a cached reference, because a VM rebuild replaces the bridge (the same rule
+	/// ScriptRuntime follows).</summary>
+	private bool DispatchEventToLua(int subject, string eventName, int subscriber, int other, int playerId, bool fromPlayer)
+	{
+		LuaNetBridge bridge = LuaManager.Instance.NetBridge;
+		if (bridge == null || bridge.IsDead) return false;
+		return bridge.TryDispatchEvent(subject, eventName, subscriber, other, playerId, fromPlayer);
 	}
 
 	/// <summary>Creates the player camera on first use and keeps it bound to the shared input
@@ -521,7 +655,7 @@ public partial class BuilderScene : Node3D
 	/// drains the net queue, then processes a deferred VM rebuild (see ScriptRuntime.Tick).</summary>
 	public override void _Process(double delta)
 	{
-		if (LuaScripts != null) LuaScripts.Tick();
+		if (LuaScripts != null) LuaScripts.Tick(delta);
 #if DEBUG
 		// The net integration suite deliberately waits a few physics frames: its OOM churn and
 		// ~5M-instruction script loads would otherwise slow the startup frame enough to change the
@@ -550,6 +684,14 @@ public partial class BuilderScene : Node3D
 		// The constraint suite's staged gravity probe needs physics frames to pass (a body only
 		// moves when the engine steps), so it is advanced from here rather than inside the suite.
 		ConstraintSelfTest.TickGravityProbe();
+		// The event suite (milestone 3.7) runs after the constraint probe is done: both drive Test
+		// mode, and only one session probe may own the lot at a time.
+		if (!_eventSuiteDone && ConstraintSelfTest.GravityProbeDone)
+		{
+			_eventSuiteDone = true;
+			EventSelfTest.Run(this);
+		}
+		EventSelfTest.TickProbe();
 #endif
 	}
 
@@ -575,6 +717,12 @@ public partial class BuilderScene : Node3D
 		if (_constraintSuiteDone && !ConstraintSelfTest.GravityProbeDone)
 			GD.PushWarning("[BuilderScene] constraint gravity probe never finished (it needs ~1.4 s of wall-clock " +
 				"runtime after the suite, so give the run room: --quit-after 500 verified headless)");
+		if (!_eventSuiteDone)
+			GD.PushWarning("[BuilderScene] event suite never ran (run ended before the constraint probe finished; " +
+				"use --quit-after 500 when verifying headless)");
+		else if (!EventSelfTest.ProbeDone)
+			GD.PushWarning("[BuilderScene] event probe never finished (it needs ~2 s of wall-clock runtime after " +
+				"its suite, so give the run room: --quit-after 500 verified headless)");
 #endif
 	}
 
@@ -908,6 +1056,10 @@ public partial class BuilderScene : Node3D
 				ForgetHandle(handle);
 				LuaNetBridge bridge = LuaManager.Instance.NetBridge;
 				if (bridge != null) bridge.ForgetEntity(handle);
+				// Events (milestone 3.7): both ends of the subscription table go with the entity —
+				// what it registered anywhere and what others registered on it (design doc D13) —
+				// and its sensor dies with the node.
+				if (Events != null) Events.ForgetEntity(handle);
 				// A constraint must never outlive a part it links (a joint whose body node is gone
 				// is a crash), so the records go first and the live joints follow them.
 				LotConstraints.RemoveFor(handle);

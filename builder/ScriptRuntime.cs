@@ -31,7 +31,12 @@ public sealed class ScriptRuntime
 	private readonly Action<string> _warn;
 	private readonly Action _afterFrame;
 	private readonly Func<bool> _isSuspended;
+	private readonly LotEventRegistry _events;
+	private readonly Func<bool> _eventsActive;
 	private readonly List<string> _loaded = new List<string>();
+	// Entities whose scripts declared onFrame, in load order (design doc D15). Pruned lazily when a
+	// handler vanishes (destroyed or reloaded).
+	private readonly List<int> _frameEntities = new List<int>();
 
 	// Scripts that failed to load because the VM ran out of memory: key -> fingerprint of the code
 	// that failed. Kept HERE (C#, not in the VM) so the record survives VM rebuilds — this object is
@@ -55,13 +60,19 @@ public sealed class ScriptRuntime
 	/// game) so a deferred VM rebuild happens after dispatch, never during it.</param>
 	/// <param name="isSuspended">True when the rebuild limiter has suspended scripting: the runtime
 	/// then stops ticking and never reloads (the lot needs a reload to recover).</param>
+	/// <param name="events">The lot's event registry (milestone 3.7): ticked while a session is
+	/// active and cleared on every reload, so sensors and subscriptions never survive the world
+	/// they belonged to. Null keeps the pre-3.7 behaviour (no event drain).</param>
+	/// <param name="eventsActive">Session gate for the event drain and onFrame (design doc D1).</param>
 	public ScriptRuntime(Func<LuaNetBridge> bridgeResolver, Action<string> warn, Action afterFrame = null,
-		Func<bool> isSuspended = null)
+		Func<bool> isSuspended = null, LotEventRegistry events = null, Func<bool> eventsActive = null)
 	{
 		_bridgeResolver = bridgeResolver;
 		_warn = warn;
 		_afterFrame = afterFrame;
 		_isSuspended = isSuspended;
+		_events = events;
+		_eventsActive = eventsActive;
 	}
 
 	/// <summary>
@@ -107,6 +118,11 @@ public sealed class ScriptRuntime
 		// so a re-run cannot see the previous load's net state (stale redeclaration warnings, a
 		// still-disabled entity, or a trip blamed on the wrong script).
 		bridge.ClearRegistries();
+		// The event layer is a clean slate too (design doc D13): both registries clear and every
+		// sensor comes down; the re-run scripts re-subscribe, and the session's next drain
+		// re-attaches the sensors.
+		if (_events != null) _events.ClearAll();
+		_frameEntities.Clear();
 		// F2: every load is a restart, so the entities the previous load spawned are removed first —
 		// that is what keeps a root script spawning the capsule/camera from duplicating them.
 		CleanupOwnedSpawns();
@@ -155,10 +171,12 @@ public sealed class ScriptRuntime
 
 	/// <summary>
 	/// One lot frame: pick up a VM rebuild if one happened, start the frame's instruction
-	/// accounting, drain the net queue, then let the owner process a deferred VM rebuild. Called
-	/// from BuilderScene._Process.
+	/// accounting, drain the event queue and run every captured onFrame (both session-gated,
+	/// milestone 3.7 — design doc D1/D6), drain the net queue, then let the owner process a
+	/// deferred VM rebuild. Called from BuilderScene._Process; <paramref name="delta"/> is handed
+	/// to onFrame handlers.
 	/// </summary>
-	public void Tick()
+	public void Tick(double delta = 0.0)
 	{
 		// The rebuild limiter can suspend scripting (a script that OOMs every load or every call):
 		// then nothing ticks, nothing reloads, and the lot needs a reload to recover.
@@ -171,6 +189,14 @@ public sealed class ScriptRuntime
 			HandleRebuild(bridge);
 
 		bridge.BeginFrame();
+		// Events and onFrame fire only inside a player session (design doc D1): they are
+		// physics-driven, and build mode must not fire touch storms or fight the gizmo/undo.
+		// Drained before the net queue so a handler's net.* call dispatches the same frame.
+		if (_events != null && (_eventsActive == null || _eventsActive()))
+		{
+			_events.Drain();
+			TickFrames(bridge, delta);
+		}
 		if (bridge.Router != null) bridge.Router.Flush();
 		if (_afterFrame != null) _afterFrame();
 
@@ -179,6 +205,17 @@ public sealed class ScriptRuntime
 		LuaNetBridge after = Resolve();
 		if (after != null && !ReferenceEquals(after, bridge))
 			HandleRebuild(after);
+	}
+
+	/// <summary>Runs each entity's captured onFrame as its own watchdog unit (design doc D15); an
+	/// entity whose handler vanished (destroyed or reloaded) is pruned from the list.</summary>
+	private void TickFrames(LuaNetBridge bridge, double delta)
+	{
+		for (int i = 0; i < _frameEntities.Count; i++)
+		{
+			if (bridge.CallOnFrame(_frameEntities[i], delta)) continue;
+			_frameEntities.RemoveAt(i--);
+		}
 	}
 
 	private void HandleRebuild(LuaNetBridge bridge)
@@ -262,6 +299,11 @@ public sealed class ScriptRuntime
 			if (result == ScriptLoadResult.Loaded)
 			{
 				_loaded.Add(displayName);
+				// onFrame (design doc D15): tracked per entity, so the session tick can run it as
+				// its own watchdog unit. One slot per entity, so a second script defining one
+				// overwrites the first — the same collision rule net.* uses.
+				if (bridge.HasFrameHandler(handle) && !_frameEntities.Contains(handle))
+					_frameEntities.Add(handle);
 			}
 			else if (result == ScriptLoadResult.OutOfMemory)
 			{
@@ -283,6 +325,8 @@ public sealed class ScriptRuntime
 	{
 		_loaded.Clear();
 		_quarantined.Clear(); // fresh lot: quarantine is per-lot state
+		if (_events != null) _events.ClearAll();
+		_frameEntities.Clear();
 		_lotRoot = null;
 		_ensureHandle = null;
 		_readScript = null;

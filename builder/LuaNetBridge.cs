@@ -12,7 +12,9 @@ using NLua;
 ///   - Inbound:  TryDispatch(...) decodes the args payload straight onto the KeraLua stack and
 ///     calls the bootstrap's __openlot_dispatch. No LuaTable/LuaFunction wrapper is ever retained.
 ///   - Watchdog policy: every dispatch is an armed execution unit; 3 trips on one entity disable
-///     that entity's net handlers for the session (step-3 amendment 1).
+///     that entity's net handlers for the session (step-3 amendment 1). Milestone 3.7's event
+///     deliveries and onFrame run through the same unit / trip / disable policy — one breaker, not
+///     two (see TryDispatchEvent / CallOnFrame).
 ///   - OOM policy: the allocator's OomHit flag is checked after every dispatch — a script's own
 ///     pcall can swallow the "not enough memory" error, so the flag is the only reliable signal.
 ///     Rebuilding the VM is deferred to the owner (LuaManager) at a safe point, never mid-dispatch.
@@ -285,6 +287,18 @@ public sealed class LuaNetBridge : IDispatchTarget
 					{
 						_state.SetTop(_state.GetTop() - 1);
 					}
+
+					// onFrame capture (milestone 3.7): the env's onFrame goes to the Lua-side
+					// registry via __openlot_captureFrame (nil is fine — the helper ignores it),
+					// so a script without one costs a single call and nothing else. Same watchdog
+					// unit as the chunk and start().
+					if (ok)
+					{
+						_state.GetGlobal("__openlot_captureFrame");
+						_state.PushInteger(handle);
+						_state.GetField(envIndex, "onFrame");
+						if (!CallAndCheck(2, 0, "onFrame", ref error)) ok = false;
+					}
 				}
 			}
 		}
@@ -427,6 +441,165 @@ public sealed class LuaNetBridge : IDispatchTarget
 		if (Router != null) Router.UnregisterEntity(handle);
 		Warn("[Net] entity " + handle + " (" + script +
 			"): net handlers disabled after " + trips + " watchdog trips");
+	}
+
+	// --- Events (milestone 3.7) --------------------------------------------------------------
+
+	/// <summary>
+	/// Delivers one event to one subscriber under the same watchdog policy as a net dispatch: one
+	/// armed execution unit, trips counted in the shared per-entity breaker (three disable the
+	/// entity's handlers, net and events alike), OOM checked after the call. Returns true when the
+	/// subscriber's handler ran (or the entity is disabled); false when the registration is gone
+	/// (unsubscribed or reloaded).
+	/// </summary>
+	public bool TryDispatchEvent(int subjectHandle, string eventName, int subscriber, int otherHandle,
+		int playerId, bool fromPlayer)
+	{
+		ThrowIfDead();
+		if (_disabledEntities.Contains(subscriber)) return true;
+
+		bool handled;
+		bool tripped;
+		Watchdog?.ArmUnit(LuaWatchdog.DispatchInstructionBudget);
+		try
+		{
+			handled = InvokeEventDispatch(subjectHandle, eventName, subscriber, otherHandle, playerId, fromPlayer);
+		}
+		finally
+		{
+			tripped = Watchdog != null && Watchdog.EndUnit();
+		}
+		if (tripped) HandleEventTrip(subscriber, eventName);
+
+		if (MemoryGuard != null && MemoryGuard.ConsumeOomHit())
+		{
+			Warn("[Events] Lua out of memory while delivering '" + eventName + "' to entity " + subscriber +
+				"; the lot VM will be rebuilt");
+			OomRecreateRequested?.Invoke();
+			return true;
+		}
+		return handled;
+	}
+
+	private bool InvokeEventDispatch(int subjectHandle, string eventName, int subscriber, int otherHandle,
+		int playerId, bool fromPlayer)
+	{
+		if (_state == null)
+		{
+			Warn("[Events] no Lua state is attached; dropped '" + eventName + "' for entity " + subscriber);
+			return true;
+		}
+
+		int top = _state.GetTop();
+		try
+		{
+			_state.GetGlobal("__openlot_dispatchEvent");
+			_state.PushInteger(subjectHandle);
+			_state.PushString(eventName);
+			_state.PushInteger(subscriber);
+			_state.PushInteger(otherHandle);
+			_state.PushInteger(playerId);
+			_state.PushBoolean(fromPlayer);
+
+			KeraLua.LuaStatus status = _state.PCall(6, 1, 0);
+			if (status != KeraLua.LuaStatus.OK)
+			{
+				string error = _state.ToString(-1, false);
+				Warn("[Events] handler '" + eventName + "' on entity " + subscriber + " errored: " + error);
+				return true; // handled-and-failed: nothing else can deliver it either
+			}
+			return _state.ToBoolean(-1);
+		}
+		finally
+		{
+			_state.SetTop(top);
+		}
+	}
+
+	/// <summary>The event-side trip handler: the same counter, breaker and disable mechanics as the
+	/// net path. The blame is the entity's registered script name — events have no declaration
+	/// table to resolve a more precise one from, and the last-loaded name is the honest answer.</summary>
+	private void HandleEventTrip(int handle, string eventName)
+	{
+		int trips;
+		_tripsByEntity.TryGetValue(handle, out trips);
+		trips++;
+		_tripsByEntity[handle] = trips;
+		string script;
+		if (!_entityScripts.TryGetValue(handle, out script) || string.IsNullOrEmpty(script)) script = "unknown script";
+		Warn("[Events] entity " + handle + " (" + script + ") hit the script execution limit (" +
+			trips + "/" + LuaWatchdog.MaxTripsPerEntity + ")");
+
+		if (trips < LuaWatchdog.MaxTripsPerEntity) return;
+
+		_disabledEntities.Add(handle);
+		LuaCall.CallVoidInt(_state, "__openlot_disableNet", handle);
+		if (Router != null) Router.UnregisterEntity(handle);
+		Warn("[Events] entity " + handle + " (" + script +
+			"): handlers disabled after " + trips + " watchdog trips");
+	}
+
+	/// <summary>
+	/// Runs one entity's captured onFrame as its own watchdog unit (design doc D15). Returns false
+	/// when the entity no longer has a frame handler (destroyed or reloaded), so the caller can
+	/// prune its list.
+	/// </summary>
+	public bool CallOnFrame(int handle, double delta)
+	{
+		ThrowIfDead();
+		if (_disabledEntities.Contains(handle)) return true;
+
+		bool handled;
+		bool tripped;
+		Watchdog?.ArmUnit(LuaWatchdog.DispatchInstructionBudget);
+		try
+		{
+			handled = InvokeFrame(handle, delta);
+		}
+		finally
+		{
+			tripped = Watchdog != null && Watchdog.EndUnit();
+		}
+		if (tripped) HandleEventTrip(handle, "onFrame");
+
+		if (MemoryGuard != null && MemoryGuard.ConsumeOomHit())
+		{
+			Warn("[Events] Lua out of memory in onFrame on entity " + handle + "; the lot VM will be rebuilt");
+			OomRecreateRequested?.Invoke();
+			return true;
+		}
+		return handled;
+	}
+
+	private bool InvokeFrame(int handle, double delta)
+	{
+		if (_state == null) return false;
+		int top = _state.GetTop();
+		try
+		{
+			_state.GetGlobal("__openlot_callFrame");
+			_state.PushInteger(handle);
+			_state.PushNumber(delta);
+			KeraLua.LuaStatus status = _state.PCall(2, 1, 0);
+			if (status != KeraLua.LuaStatus.OK)
+			{
+				string error = _state.ToString(-1, false);
+				Warn("[Events] onFrame on entity " + handle + " errored: " + error);
+				return true;
+			}
+			return _state.ToBoolean(-1);
+		}
+		finally
+		{
+			_state.SetTop(top);
+		}
+	}
+
+	/// <summary>True when the entity's script declared onFrame (captured at load, design doc D15).</summary>
+	public bool HasFrameHandler(int handle)
+	{
+		ThrowIfDead();
+		return LuaCall.CallBoolInt(_state, "__openlot_hasFrame", handle);
 	}
 
 	/// <summary>The script to blame for a trip on (handle, direction, name): the declaring script

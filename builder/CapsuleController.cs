@@ -6,9 +6,11 @@ using Godot;
 /// jump) and its position is written back onto the visual capsule LotObject every physics step, so
 /// the part the creator sees IS the character the player moves.
 ///
-/// The body is layer 0 / mask 1 and excludes the character's own static collider, so the part never
-/// blocks itself — the same technique PartDragController uses for direct part dragging. Movement is
-/// deliberately kinematic (not a rigid body), matching the milestone's "basic movement".
+/// The body wears only the event-only layer bit (§3.7) — not any group layer, so no raycast or
+/// pick can reach it — and masks the Character group's row of the §3.5 matrix, so which parts the
+/// player collides with is creator-set. It excludes the character's own static collider, so the
+/// part never blocks itself — the same technique PartDragController uses for direct part dragging.
+/// Movement is deliberately kinematic (not a rigid body), matching the milestone's "basic movement".
 /// </summary>
 public sealed class CapsuleController
 {
@@ -44,6 +46,13 @@ public sealed class CapsuleController
 
 	public bool IsGrounded { get { return IsAttached && _body.IsOnFloor(); } }
 
+	/// <summary>True when <paramref name="node"/> is this player's invisible physics body. The
+	/// event layer (§3.7) uses it to attribute a touch to the player's character entity.</summary>
+	public bool OwnsBody(Node node)
+	{
+		return node != null && _body != null && GodotObject.IsInstanceValid(_body) && node == _body;
+	}
+
 	/// <summary>
 	/// Attaches the controller to a lot capsule, creating the physics body inside the lot's physics
 	/// space. Returns false when the capsule is not there.
@@ -57,10 +66,11 @@ public sealed class CapsuleController
 
 		_body = new CharacterBody3D();
 		_body.Name = "PlayerBody";
-		// Layer 0 so the body is never a collision target or a pick hit; the mask is the Character
-		// group's row of the §3.5 matrix, so which parts the player collides with is creator-set —
-		// the same split PartDragController.CreateMover uses.
-		_body.CollisionLayer = 0;
+		// No group layer, so the body is never a collision target or a pick hit; it wears only the
+		// event-only bit (§3.7), which nothing but an event sensor looks for. The mask is the
+		// Character group's row of the §3.5 matrix, so which parts the player collides with is
+		// creator-set — the same split PartDragController.CreateMover uses.
+		_body.CollisionLayer = LotCollisionGroups.CharacterBodyBit;
 		_body.CollisionMask = LotCollisionGroups.MaskForName(LotCollisionGroups.CharacterGroup);
 		_body.SetMeta(LotObject.InternalChildMeta, true);
 

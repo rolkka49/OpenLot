@@ -96,9 +96,11 @@ public class LuaManager
 			for (int i = 0; i < methods.Length; i++)
 			{
 				state.RegisterFunction(methods[i].Name, api, methods[i]);
-				// NetInvoke/NetRegister are bootstrap plumbing called by name from the chunk, not
-				// creator API: registered as globals above, deliberately kept out of the Lot table.
-				if (methods[i].Name == "NetInvoke" || methods[i].Name == "NetRegister") continue;
+				// NetInvoke/NetRegister and the event plumbing (SubscribeEvent/UnsubscribeEvent,
+				// milestone 3.7) are bootstrap sugar called by name from the chunk, not creator
+				// API: registered as globals above, deliberately kept out of the Lot table.
+				if (methods[i].Name == "NetInvoke" || methods[i].Name == "NetRegister" ||
+					methods[i].Name == "SubscribeEvent" || methods[i].Name == "UnsubscribeEvent") continue;
 				lotTable.Append("Lot.").Append(methods[i].Name).Append(" = ").Append(methods[i].Name).Append('\n');
 			}
 

@@ -69,6 +69,22 @@ internal static class LuaCall
 		}
 	}
 
+	internal static bool CallBoolInt(KeraLua.Lua state, string functionName, int argument)
+	{
+		int top = state.GetTop();
+		try
+		{
+			state.GetGlobal(functionName);
+			state.PushInteger(argument);
+			RequireOk(state, state.PCall(1, 1, 0), functionName);
+			return state.ToBoolean(-1);
+		}
+		finally
+		{
+			state.SetTop(top);
+		}
+	}
+
 	internal static double CallNumber(KeraLua.Lua state, string functionName)
 	{
 		int top = state.GetTop();
@@ -139,6 +155,11 @@ local currentFromPlayer = false
 local netRegistry = {}
 local disabledEntities = {}
 local entityScripts = {}
+-- Event system (milestone 3.7): callbacks live here, keyed (subject -> event -> ordered list of
+-- { owner = env identity, subscriber = handle, fn = callback }), so no LuaFunction wrapper ever
+-- crosses into C#. frameFunctions holds each entity's captured onFrame (handle -> function).
+local eventRegistry = {}
+local frameFunctions = {}
 
 -- --- watchdog state (armed/cleared from C#; the hook itself lives here) ---
 local tripped = false
@@ -205,8 +226,40 @@ function __openlot_forgetEntity(handle)
     netRegistry[handle] = nil
     disabledEntities[handle] = nil
     entityScripts[handle] = nil
+    frameFunctions[handle] = nil
+    -- Handlers watching this entity (it as the subject) and handlers it registered on others
+    -- (it as a subscriber) go through one walk, so a destroyed entity leaves nothing behind in
+    -- either direction (design doc D13). Empty lists and subjects are pruned as we go; the outer
+    -- walk only reads eventRegistry, so the removals happen after it.
+    eventRegistry[handle] = nil
+    local emptySubjects = {}
+    for subject, registry in next, eventRegistry do
+        local emptied = false
+        for eventName, list in next, registry do
+            for i = #list, 1, -1 do
+                if list[i].subscriber == handle then table.remove(list, i) end
+            end
+            if #list == 0 then registry[eventName] = nil; emptied = true end
+        end
+        if emptied and next(registry) == nil then emptySubjects[#emptySubjects + 1] = subject end
+    end
+    for i = 1, #emptySubjects do eventRegistry[emptySubjects[i]] = nil end
 end
 function __openlot_setEntityScript(handle, scriptName) entityScripts[handle] = scriptName end
+-- onFrame (milestone 3.7): captured at script load from the env's onFrame; one execution unit
+-- per entity per frame, session-gated by the C# side (design doc D15).
+function __openlot_captureFrame(handle, fn)
+    if type(fn) == "function" then frameFunctions[handle] = fn end
+end
+function __openlot_hasFrame(handle) return frameFunctions[handle] ~= nil end
+function __openlot_callFrame(handle, delta)
+    local fn = frameFunctions[handle]
+    if fn == nil then return false end
+    if disabledEntities[handle] then return true end
+    local ok, err = raw_pcall(fn, delta)
+    if not ok then error(err, 0) end
+    return true
+end
 -- Item 6: a (re)load is a clean slate. Clearing the registries up front stops a re-run from seeing
 -- a previous load's declarations, disabled flags or script names (the C# side clears its mirror).
 -- Cleared IN PLACE (not reassigned) so the upvalue identities makeNet's proxies captured stay
@@ -215,6 +268,8 @@ function __openlot_resetRegistries()
     for key in next, netRegistry do netRegistry[key] = nil end
     for key in next, disabledEntities do disabledEntities[key] = nil end
     for key in next, entityScripts do entityScripts[key] = nil end
+    for key in next, eventRegistry do eventRegistry[key] = nil end
+    for key in next, frameFunctions do frameFunctions[key] = nil end
 end
 
 -- --- validation pre-pass (v4 A6): runs in the routing closure BEFORE NetInvoke, iterating with
@@ -337,6 +392,107 @@ function makeNet(handle)
     return net
 end
 
+-- --- event subscriptions (milestone 3.7) ---
+-- The reserved vocabulary is accepted from today; only touched/touchEnded fire in this half
+-- (design doc D17). One bound plumbing pair mirrors presence into C#: SubscribeEvent /
+-- UnsubscribeEvent, deliberately not part of the Lot table.
+local EVENT_NAMES = { touched = true, touchEnded = true, clicked = true, entered = true,
+    exited = true, destroyed = true, playerJoined = true, playerLeft = true }
+
+local function makeEventCancel(handle, subject, eventName, owner)
+    return function()
+        local registry = eventRegistry[subject]
+        local list = registry ~= nil and registry[eventName] or nil
+        if list == nil then return false end
+        for i = 1, #list do
+            if list[i].owner == owner then
+                table.remove(list, i)
+                if #list == 0 then registry[eventName] = nil end
+                if next(registry) == nil then eventRegistry[subject] = nil end
+                -- Only tell C# when this entity no longer watches (subject, event) through ANY
+                -- script: the C# table is keyed by subscriber handle, not per-script.
+                local still = false
+                local remaining = eventRegistry[subject]
+                local after = remaining ~= nil and remaining[eventName] or nil
+                if after ~= nil then
+                    for j = 1, #after do
+                        if after[j].subscriber == handle then still = true break end
+                    end
+                end
+                if not still then UnsubscribeEvent(handle, subject, eventName) end
+                return true
+            end
+        end
+        return false
+    end
+end
+
+local function makeSubscribe(subscriber, owner)
+    return function(subject, eventName, fn)
+        if type(subject) ~= "number" then error("Subscribe: the subject must be an entity handle", 2) end
+        if type(eventName) ~= "string" then error("Subscribe: the event name must be a string", 2) end
+        if not EVENT_NAMES[eventName] then
+            error("Subscribe: unknown event '" .. eventName .. "'", 2)
+        end
+        if type(fn) ~= "function" then error("Subscribe: the handler must be a function", 2) end
+
+        local registry = eventRegistry[subject]
+        if registry == nil then registry = {}; eventRegistry[subject] = registry end
+        local list = registry[eventName]
+        if list == nil then list = {}; registry[eventName] = list end
+
+        -- Redeclaration within this script replaces in place; another script on the same entity
+        -- appends (its owner identity differs). The plumbing call is idempotent on both paths.
+        for i = 1, #list do
+            if list[i].owner == owner then
+                list[i].fn = fn
+                SubscribeEvent(subscriber, subject, eventName)
+                return makeEventCancel(subscriber, subject, eventName, owner)
+            end
+        end
+        list[#list + 1] = { owner = owner, subscriber = subscriber, fn = fn }
+        SubscribeEvent(subscriber, subject, eventName)
+        return makeEventCancel(subscriber, subject, eventName, owner)
+    end
+end
+
+-- Dispatch scratch, reused so a delivery with several handlers allocates nothing. Entries are
+-- collected before any pcall runs: a handler may unsubscribe mid-dispatch, and the snapshot keeps
+-- iteration stable (and in declaration order).
+local eventDispatchScratch = {}
+
+function __openlot_dispatchEvent(subject, eventName, subscriber, other, playerId, fromPlayer)
+    local registry = eventRegistry[subject]
+    local list = registry ~= nil and registry[eventName] or nil
+    if list == nil then return false end
+
+    local n = 0
+    for i = 1, #list do
+        local entry = list[i]
+        if entry.subscriber == subscriber then n = n + 1; eventDispatchScratch[n] = entry end
+    end
+    if n == 0 then return false end
+
+    local player = fromPlayer and playerId or nil
+    local previousSender, previousFromPlayer = currentSender, currentFromPlayer
+    local handled = false
+    for i = 1, n do
+        local entry = eventDispatchScratch[i]
+        eventDispatchScratch[i] = nil
+        if entry ~= nil and not disabledEntities[subscriber] then
+            currentSender, currentFromPlayer = playerId, fromPlayer
+            local ok, err = raw_pcall(entry.fn, other, player)
+            if not ok then
+                currentSender, currentFromPlayer = previousSender, previousFromPlayer
+                error(err, 0)
+            end
+            handled = true
+        end
+    end
+    currentSender, currentFromPlayer = previousSender, previousFromPlayer
+    return handled
+end
+
 function __openlot_dispatch(handle, direction, name, sender, fromPlayer, args)
     local registry = netRegistry[handle]
     if registry == nil or disabledEntities[handle] then return false end
@@ -358,6 +514,11 @@ function __openlot_newEnv(handle)
     local env = setmetatable({}, { __index = __openlot_sandbox, __metatable = false })
     rawset_priv(env, "_G", env) -- per-env alias: _G.x = 1 writes to THIS script's env, not the shared table
     rawset_priv(env, "net", makeNet(handle))
+    -- Per-env subscription sugar (milestone 3.7): the subscriber identity is this env's handle,
+    -- and the fresh owner table is what makes "replaces within a script, appends across scripts"
+    -- real for two scripts on one entity.
+    local owner = {}
+    rawset_priv(env, "Subscribe", makeSubscribe(handle, owner))
     rawset_priv(env, "this", setmetatable({}, {
         __index = { Handle = handle },
         __newindex = function() error("this is read-only", 2) end,

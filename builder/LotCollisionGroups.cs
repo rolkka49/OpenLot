@@ -40,9 +40,10 @@ public static class LotCollisionGroups
 
 	/// <summary>
 	/// The group the player character conceptually belongs to. The invisible player body is not
-	/// itself a collision target (layer 0, so no editor raycast can pick it), so it does not "wear"
-	/// this group's bit — it wears this group's <b>row</b> of the matrix as its mask, which is what
-	/// makes the character's interactions creator-controlled like any part's.
+	/// itself a collision target and must never be pickable, so it wears no group bit — it wears
+	/// this group's <b>row</b> of the matrix as its mask (which is what makes the character's
+	/// interactions creator-controlled like any part's) and only the event-only
+	/// <see cref="CharacterBodyBit"/>, which nothing but an event sensor looks for.
 	/// </summary>
 	public const string CharacterGroup = "Character";
 
@@ -69,6 +70,25 @@ public static class LotCollisionGroups
 	/// <summary>What the editor's picking raycasts test: every part whatever its group, plus the
 	/// no-collide layer, so a part stays selectable/draggable (milestone 2.3).</summary>
 	public const uint PickMask = AllBits | NoCollideBit; // 0x1FF
+
+	/// <summary>
+	/// Event-only layer bit for the player's invisible body (milestone 3.7). The body is not a
+	/// collision target and must never be pickable, so it is not on any group layer — but a Godot
+	/// <c>Area3D</c> can only detect a body whose layer intersects its mask, so a body on layer 0
+	/// is invisible to sensors too. This bit is included by <see cref="EventSensorMask"/> and by
+	/// nothing else: no matrix row, no pick mask and no drag mask carries it, so every existing
+	/// interaction is unchanged.
+	/// </summary>
+	public const uint CharacterBodyBit = 1u << 9;
+
+	/// <summary>
+	/// What an event sensor detects (milestone 3.7): every part whatever its group, a
+	/// <c>CanCollide = false</c> part on the no-collide layer, and the player's event-only body
+	/// bit. Deliberately independent of the interaction matrix — the matrix governs physics and
+	/// must not silently swallow events — so it is derived from the bit constants, never from a
+	/// matrix row.
+	/// </summary>
+	public const uint EventSensorMask = AllBits | NoCollideBit | CharacterBodyBit; // 0x2FF
 
 	private static readonly bool[,] _collides = new bool[Count, Count];
 

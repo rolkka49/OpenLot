@@ -243,6 +243,12 @@ public sealed class LotConstraintSession
 		{
 			LotObject part = _partBuffer[i];
 			if (!GodotObject.IsInstanceValid(part)) continue;
+			// A node that is queued for deletion is still in the tree for the rest of the frame.
+			// Simulating one would give it a root-hosted body that its own deletion cannot release
+			// (the body is a sibling, not a child — see SetSimulated), leaving an orphaned
+			// collider in the lot: §3.7's walk-path probe caught exactly that, where a just-
+			// destroyed loose part's body blocked the character in the next session.
+			if (part.IsQueuedForDeletion()) continue;
 			bool shouldSimulate = simulate && !part.Anchored && part != exclude;
 			// The lot root hosts the simulated body as a sibling of the part (see SetSimulated).
 			part.SetSimulated(shouldSimulate, _scene.LotRoot);

@@ -160,6 +160,11 @@ public sealed class NetRouter
 
 	public int QueuedCount => _queue.Count;
 
+	/// <summary>Local peer id from the active transport — the transport owns identity, never a
+	/// hardcoded id (§8.2's P2P rule). The event system (§3.7) uses it as the `player` argument
+	/// when the local character causes a touch.</summary>
+	public int LocalPeerId { get { return _transport.LocalPeerId; } }
+
 	/// <summary>Drops every queued envelope and returns how many were dropped. Used when the owning
 	/// VM is torn down: the payloads can no longer be dispatched, and holding them would only keep
 	/// memory alive through the discard.</summary>

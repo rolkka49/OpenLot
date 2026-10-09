@@ -1,3 +1,4 @@
+using System;
 using Godot;
 
 public enum LotObjectKind
@@ -59,6 +60,14 @@ public partial class LotObject : Node3D
 	/// collision body, drag mover). The hierarchy skips any node carrying it.
 	/// </summary>
 	public const string InternalChildMeta = "openlot_internal";
+
+	/// <summary>
+	/// Meta key carrying the owning entity's handle on a physics body (milestone 3.7). Set on a
+	/// simulated body, which lives at the lot root away from its part, so the event layer can
+	/// resolve a touched body back to its entity; a static body is a child of its part and is
+	/// resolved by walking up to the nearest node with <see cref="BuilderScene.HandleMeta"/>.
+	/// </summary>
+	public const string SimulatedOwnerMeta = "openlot_body_owner";
 
 	/// <summary>
 	/// Layer of the default collision group (milestone 3.5). The single source of truth is
@@ -733,6 +742,9 @@ public partial class LotObject : Node3D
 		}
 
 		newBody.SetMeta(InternalChildMeta, true);
+		// The event layer resolves a touched body back to its entity through this (§3.7): a
+		// simulated body sits at the lot root, so walking up its parents would never find the part.
+		if (HasMeta(BuilderScene.HandleMeta)) newBody.SetMeta(SimulatedOwnerMeta, GetMeta(BuilderScene.HandleMeta));
 		newParent.AddChild(newBody);
 		newBody.AddChild(CollisionShape);
 		newBody.GlobalTransform = bodyWorld; // the swap must not move anything
@@ -757,6 +769,129 @@ public partial class LotObject : Node3D
 		CollisionBody = null;
 		CollisionShape = null;
 		if (body != null && GodotObject.IsInstanceValid(body)) body.Free();
+	}
+
+	// --- Event sensor (milestone 3.7) ---
+
+	/// <summary>
+	/// How far the event sensor is grown past the part's collision shape, in local units. Physics
+	/// stops a moving body exactly at contact — which is touching, not overlapping — so an
+	/// exact-size volume would never report a resting ball or a character pressing a wall. The pad
+	/// makes "touched" mean "in contact or within this distance" (design doc D11).
+	/// </summary>
+	public const float SensorPad = 0.15f;
+
+	/// <summary>True while this part carries an event sensor (a session artifact, §3.7).</summary>
+	public bool HasEventSensor { get { return _eventSensor != null && GodotObject.IsInstanceValid(_eventSensor); } }
+
+	private Area3D _eventSensor;
+	private Action<LotObject, Node3D> _sensorBodyEntered;
+	private Action<LotObject, Node3D> _sensorBodyExited;
+
+	/// <summary>
+	/// Creates the part's event sensor if it does not exist yet: an <c>Area3D</c> whose shape is a
+	/// padded copy of the part's collision shape, monitoring bodies on
+	/// <see cref="LotCollisionGroups.EventSensorMask"/>. Internal-marked like the collision body
+	/// and never monitorable, so no hierarchy row, no snapshot and no other area ever sees it; it
+	/// inherits the part's transform and scale exactly like the collision body does.
+	///
+	/// Returns false when the node cannot host a sensor (a decal, or a mesh-less group), which is
+	/// what lets the event registry report a refused subscription instead of failing silently.
+	/// Idempotent: a second call keeps the existing sensor and just refreshes the callbacks.
+	/// </summary>
+	public bool EnsureEventSensor(Action<LotObject, Node3D> bodyEntered, Action<LotObject, Node3D> bodyExited)
+	{
+		if (HasEventSensor)
+		{
+			_sensorBodyEntered = bodyEntered;
+			_sensorBodyExited = bodyExited;
+			return true;
+		}
+		if (Kind == LotObjectKind.Decal) return false;
+		if (CollisionShape == null || !GodotObject.IsInstanceValid(CollisionShape) || CollisionShape.Shape == null) return false;
+
+		Area3D area = new Area3D();
+		area.Name = "EventSensor";
+		// Layer 0: the sensor itself is never detected by anything. The mask is the event set —
+		// every group, the no-collide layer and the player's event-only bit (§3.7 D10/D12).
+		area.CollisionLayer = 0;
+		area.CollisionMask = LotCollisionGroups.EventSensorMask;
+		area.Monitoring = true;
+		area.Monitorable = false;
+		area.SetMeta(InternalChildMeta, true);
+
+		CollisionShape3D sensorShape = new CollisionShape3D();
+		sensorShape.Name = "Shape";
+		sensorShape.Shape = MakeSensorShape(CollisionShape.Shape);
+		sensorShape.SetMeta(InternalChildMeta, true);
+		area.AddChild(sensorShape);
+
+		area.BodyEntered += OnSensorBodyEntered;
+		area.BodyExited += OnSensorBodyExited;
+
+		_sensorBodyEntered = bodyEntered;
+		_sensorBodyExited = bodyExited;
+		_eventSensor = area;
+		AddChild(area);
+		return true;
+	}
+
+	/// <summary>Removes the event sensor. Called when the last subscription on this part goes away
+	/// and when a session ends (sensors are session artifacts). Safe to call when absent.</summary>
+	public void ReleaseEventSensor()
+	{
+		_sensorBodyEntered = null;
+		_sensorBodyExited = null;
+		if (_eventSensor != null && GodotObject.IsInstanceValid(_eventSensor)) _eventSensor.Free();
+		_eventSensor = null;
+	}
+
+	private void OnSensorBodyEntered(Node3D body)
+	{
+		Action<LotObject, Node3D> handler = _sensorBodyEntered;
+		if (handler != null) handler(this, body);
+	}
+
+	private void OnSensorBodyExited(Node3D body)
+	{
+		Action<LotObject, Node3D> handler = _sensorBodyExited;
+		if (handler != null) handler(this, body);
+	}
+
+	/// <summary>
+	/// A padded copy of a part's collision shape for the event sensor. An unknown shape type is
+	/// shared as-is rather than invented — an unpadded sensor still detects real overlaps, it
+	/// just cannot catch flush contact.
+	/// </summary>
+	private static Shape3D MakeSensorShape(Shape3D source)
+	{
+		if (source is BoxShape3D box)
+		{
+			BoxShape3D grown = new BoxShape3D();
+			grown.Size = box.Size + new Vector3(SensorPad * 2f, SensorPad * 2f, SensorPad * 2f);
+			return grown;
+		}
+		if (source is SphereShape3D sphere)
+		{
+			SphereShape3D grown = new SphereShape3D();
+			grown.Radius = sphere.Radius + SensorPad;
+			return grown;
+		}
+		if (source is CapsuleShape3D capsule)
+		{
+			CapsuleShape3D grown = new CapsuleShape3D();
+			grown.Radius = capsule.Radius + SensorPad;
+			grown.Height = capsule.Height + SensorPad * 2f;
+			return grown;
+		}
+		if (source is CylinderShape3D cylinder)
+		{
+			CylinderShape3D grown = new CylinderShape3D();
+			grown.Radius = cylinder.Radius + SensorPad;
+			grown.Height = cylinder.Height + SensorPad * 2f;
+			return grown;
+		}
+		return source;
 	}
 
 	/// <summary>

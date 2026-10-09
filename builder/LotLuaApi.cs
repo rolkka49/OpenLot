@@ -749,6 +749,32 @@ public class LotLuaApi
 		Net.InvokeFromLua(handle, direction, name, args);
 	}
 
+	// --- event-subscription plumbing (milestone 3.7) ---
+	//
+	// These two are NOT creator API: the bootstrap's per-env Subscribe sugar calls them by name
+	// (like NetInvoke/NetRegister) and LuaManager keeps them out of the documented Lot table. The
+	// callback itself never crosses this boundary — it stays in the bootstrap's Lua-side registry
+	// (design doc D4) — so this pair only mirrors subscription presence into the C#
+	// LotEventRegistry, which owns presence, sensors and delivery.
+
+	/// <summary>Records that <paramref name="handle"/> watches <paramref name="eventName"/> on
+	/// <paramref name="targetHandle"/>. Called by the bootstrap's Subscribe sugar only (idempotent:
+	/// the sugar calls it on both its append and replace paths); a refusal (bad handle, unknown
+	/// event) is warned about by the registry and otherwise ignored.</summary>
+	public void SubscribeEvent(int handle, int targetHandle, string eventName)
+	{
+		if (_scene == null || _scene.Events == null) return;
+		_scene.Events.Subscribe(handle, targetHandle, eventName);
+	}
+
+	/// <summary>Removes one (subscriber, subject, event) subscription. Called by the bootstrap's
+	/// cancel token only, and only once no script on the entity still watches the pair.</summary>
+	public void UnsubscribeEvent(int handle, int targetHandle, string eventName)
+	{
+		if (_scene == null || _scene.Events == null) return;
+		_scene.Events.Unsubscribe(handle, targetHandle, eventName);
+	}
+
 	// --- internals ---
 
 	private int Spawn3D(LotObjectKind kind, Vector3 at)
