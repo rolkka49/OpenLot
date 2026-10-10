@@ -1,6 +1,6 @@
 # Design index — Milestone 3.2: unified per-entity script model (`net.*`)
 
-**Status:** implemented for the offline / single-player path. Real peer-to-peer transport is §7 work;
+**Status:** implemented for the offline / single-player path. Real peer-to-peer transport is §10 work;
 nothing here changes when it lands (the transport is a seam, see §4).
 **Creator-facing companion doc:** [`docs/net-api.md`](../net-api.md)
 **Verified by:** `NetSelfTest` (169 fast checks, all on private Lua states; an opt-in 8-check heavy
@@ -30,7 +30,7 @@ depends on them.
 | D11 | **Circuit breaker:** 3 trips disable that entity's net handlers for the session, warning with the entity and script file name. | `LuaNetBridge.HandleTrip` |
 | D12 | **Memory:** hard cap via `lua_setallocf` (64 MB). `ptr == NULL` ⇒ `osize` is a type tag ⇒ old size 0; used-bytes clamps at 0; OOM sets a flag checked after every dispatch because a script `pcall` can swallow the error; the VM is rebuilt at a frame boundary, never mid-dispatch. | `LuaMemoryGuard`, `LuaNetBridge`, `LuaManager` |
 | D13 | **Handles:** lot root = 0 (reserved); every loaded lot node gets a handle in deterministic tree order (option A — needed so one script can address another entity); objects spawned later get handles from the Lua spawn path; negative handles are reserved for client-local visuals and rejected from the wire. | `BuilderScene`, `NetRouter` |
-| D14 | **Events ≠ state:** `net.*` is transient; current world state belongs to §7 sync (late joiners miss events by design). | `docs/net-api.md` §8 |
+| D14 | **Events ≠ state:** `net.*` is transient; current world state belongs to §10 sync (late joiners miss events by design). | `docs/net-api.md` §8 |
 | D15 | **Sandbox:** default-deny whitelist, `__metatable = false` on every shared table (env, string metatable, libraries, `net`), `rawset` removed, `setmetatable` rejects `__gc`, `string.rep` capped and routed through the sealed string metatable, all dangerous globals stripped (`io/os/require/…/luanet`), `_G` aliases the script's own env. | `LuaBootstrap.Chunk` |
 | D16 | **Cross-entity calls** are creator-facing sugar (`Lot.CallServer`/`Lot.CallClient`) that shadows the raw table-taking bound methods; packing + validation happen in Lua (C# `params` marshaling would mangle `nil` holes). | `LuaBootstrap`, `LotLuaApi`, `LuaNetBridge` |
 
@@ -38,17 +38,17 @@ depends on them.
 
 | File | Responsibility |
 |---|---|
-| `builder/LuaBootstrap.cs` | The Lua chunk: sandbox, `makeNet` + `netRegistry`, dispatcher, validation pre-pass, watchdog hook, env loader, cross-entity sugar. Plus the `LuaCall` push/PCall helper (fetch-by-name, stack restored in `finally`). |
-| `builder/LuaWatchdog.cs` | Budget consts, `ArmUnit`/`EndUnit` (clears the native hook first), `BeginFrame`, armed-state queries. |
-| `builder/LuaMemoryGuard.cs` | `SetAllocFunction` allocator with the hard byte cap and the `OomHit` flag. |
-| `builder/LuaNetBridge.cs` | `IDispatchTarget` over the raw stack; outbound `InvokeFromLua`/`InvokeCrossEntity`; `LoadEntityScript` (env → chunk → `start()`); trip counting / circuit breaker; script-name registry; OOM checks; deferred-recreate callback. |
-| `builder/NetRouter.cs` | Transport-agnostic router: envelope codec, uniform queue, drain budget + frame backstop, rate limits, sender/origin authority, transitive context, declaration registry (redeclaration warning). |
-| `builder/NetTransport.cs` | `INetTransport` seam + `LoopbackTransport` (`IsHost`, peer 1, Player origin). |
-| `builder/NetSerializer.cs` | Argument wire codec (tags, table array/pair sections, budgets) + stack-based decoder; wrapper disposal. |
-| `builder/ScriptRuntime.cs` | Entity/script discovery (`LotScriptNode`), per-script envs, handle assignment order, lot-root-at-load, frame wiring (`Tick`), teardown (`Stop`). |
-| `builder/LuaManager.cs` | VM lifecycle: guard install, API registration, bootstrap application, bridge/watchdog wiring, scratch-path `RunString` (watchdog-armed), deferred rebuild. |
+| `builder/script/LuaBootstrap.cs` | The Lua chunk: sandbox, `makeNet` + `netRegistry`, dispatcher, validation pre-pass, watchdog hook, env loader, cross-entity sugar. Plus the `LuaCall` push/PCall helper (fetch-by-name, stack restored in `finally`). |
+| `builder/script/LuaWatchdog.cs` | Budget consts, `ArmUnit`/`EndUnit` (clears the native hook first), `BeginFrame`, armed-state queries. |
+| `builder/script/LuaMemoryGuard.cs` | `SetAllocFunction` allocator with the hard byte cap and the `OomHit` flag. |
+| `builder/script/LuaNetBridge.cs` | `IDispatchTarget` over the raw stack; outbound `InvokeFromLua`/`InvokeCrossEntity`; `LoadEntityScript` (env → chunk → `start()`); trip counting / circuit breaker; script-name registry; OOM checks; deferred-recreate callback. |
+| `builder/net/NetRouter.cs` | Transport-agnostic router: envelope codec, uniform queue, drain budget + frame backstop, rate limits, sender/origin authority, transitive context, declaration registry (redeclaration warning). |
+| `builder/net/NetTransport.cs` | `INetTransport` seam + `LoopbackTransport` (`IsHost`, peer 1, Player origin). |
+| `builder/net/NetSerializer.cs` | Argument wire codec (tags, table array/pair sections, budgets) + stack-based decoder; wrapper disposal. |
+| `builder/script/ScriptRuntime.cs` | Entity/script discovery (`LotScriptNode`), per-script envs, handle assignment order, lot-root-at-load, frame wiring (`Tick`), teardown (`Stop`). |
+| `builder/script/LuaManager.cs` | VM lifecycle: guard install, API registration, bootstrap application, bridge/watchdog wiring, scratch-path `RunString` (watchdog-armed), deferred rebuild. |
 | `builder/BuilderScene.cs` | Lot world + handle registry, lot-root handle 0, load-order handles, script loading in `_Ready`, `_Process` tick, `_ExitTree` teardown order. |
-| `builder/NetSelfTest.cs` | All of the above, verified (serializer, router, sandbox, watchdog, allocator, script runtime, cross-entity, live-scene wiring). |
+| `tests/NetSelfTest.cs` | All of the above, verified (serializer, router, sandbox, watchdog, allocator, script runtime, cross-entity, live-scene wiring). |
 | `docs/net-api.md` | Creator-facing reference. |
 
 ## 3. Execution flow
@@ -95,12 +95,12 @@ depends on them.
 
 ## 4. Seams for later milestones
 
-* **§7 networking:** implement `INetTransport` (ENet/P2P) and swap it in — the router, queue,
+* **§10 networking:** implement `INetTransport` (ENet/P2P) and swap it in — the router, queue,
   rate limits, authority rules and all creator code stay unchanged. Host identity comes from the
   transport, never a constant.
 * **§3.4 Test/Game mode:** `LoopbackTransport` is already the offline answer; wiring Test mode means
   starting/stopping the runtime around the mode switch and calling `Tick` from the play loop.
-* **§7 state sync:** add the snapshot channel; the event/state split is already documented (D14).
+* **§10 state sync:** add the snapshot channel; the event/state split is already documented (D14).
 * **§3.4 capsule character:** a lot-root script spawning a capsule needs only `Lot.Spawn*` plus the
   controller API — the load-time root script path already exists (D1/D13).
 
@@ -151,7 +151,7 @@ LD_LIBRARY_PATH=/tmp/nluaspike/native \
 2. **Editor-spawned objects have no handle until something registers them.** Option A covers
    everything present at lot load; a node created afterwards (toolbox spawn, duplicate) is addressed
    by Lua only once the spawn path registers it — i.e. Lua-created objects always have handles, but
-   editor-created-after-load objects may not. Revisit with §3.4/§8 (the `.lot` format should also
+   editor-created-after-load objects may not. Revisit with §3.4/§4 (the `.lot` format should also
    persist the next-handle watermark).
 3. **Coroutines are unavailable** inside scripts (they would escape the per-coroutine count hook).
    Reintroducing them means wrapping `coroutine` with per-thread budgets.
@@ -161,7 +161,7 @@ LD_LIBRARY_PATH=/tmp/nluaspike/native \
 5. **`nan`-style precision:** numbers cross as doubles (documented); values above 2^53 lose bits.
 6. **VM rebuild loses script state:** an OOM rebuild reloads scripts at the frame boundary; in-memory
    script globals are lost (documented rather than hidden).
-7. **No state sync yet (D14):** late joiners miss events *and* world state until §7.
+7. **No state sync yet (D14):** late joiners miss events *and* world state until §10 — now scoped as §10.7 (session content delivery + late-join snapshot, riding the §3.6 snapshot machinery) with the scaling pass in §10.6.
 
 **Packaging / environment notes**
 

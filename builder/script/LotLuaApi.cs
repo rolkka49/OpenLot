@@ -1,0 +1,1665 @@
+using Godot;
+
+/// <summary>
+/// The creator-facing Lua API surface — the exact contract the NLua binding (roadmap milestone
+/// 3.1) will register. Verb-first, primitives-only signatures so lot scripts never receive Godot
+/// nodes; objects are addressed through integer handles from BuilderScene's registry. This class
+/// is the ONLY sanctioned way for scripts to touch the lot tree (clinerules 1.1 / 2.2).
+/// Coordinates: 3D position/rotation/scale are local to the lot (rotation in degrees), colors are
+/// 0..1 floats, UI rects are pixels offset from the viewport's top-left corner (Y down).
+/// </summary>
+public class LotLuaApi
+{
+	private readonly BuilderScene _scene;
+
+	public LotLuaApi(BuilderScene scene)
+	{
+		_scene = scene;
+	}
+
+	// --- 3D parts ---
+
+	/// <summary>Spawns a unit cube at (x, y, z). Returns its object handle, or -1 on failure.</summary>
+	public int SpawnCube(float x, float y, float z) { return Spawn3D(LotObjectKind.Cube, new Vector3(x, y, z)); }
+
+	/// <summary>Spawns a unit sphere at (x, y, z). Returns its object handle, or -1 on failure.</summary>
+	public int SpawnSphere(float x, float y, float z) { return Spawn3D(LotObjectKind.Sphere, new Vector3(x, y, z)); }
+
+	/// <summary>Spawns a unit cylinder at (x, y, z). Returns its object handle, or -1 on failure.</summary>
+	public int SpawnCylinder(float x, float y, float z) { return Spawn3D(LotObjectKind.Cylinder, new Vector3(x, y, z)); }
+
+	/// <summary>
+	/// Spawns a unit right-angle wedge at (x, y, z). Returns its object handle, or -1 on failure.
+	/// The ramp's vertical wall faces -Z and its slope descends toward +Z; resize it with
+	/// <see cref="SetSize"/> like any sized part.
+	/// </summary>
+	public int SpawnWedge(float x, float y, float z) { return Spawn3D(LotObjectKind.Wedge, new Vector3(x, y, z)); }
+
+	/// <summary>
+	/// Spawns the default capsule character (radius 0.5, total height 2.0) at (x, y, z).
+	/// Returns its object handle, or -1 on failure.
+	///
+	/// Contract notes (milestone 3.4): the capsule's ORIGIN is its centre, so spawning at y = 1
+	/// puts its feet on the ground plane. The spawned object is a plain LotObject with a static
+	/// collision body — it does NOT move on its own. Making it controllable is the character
+	/// controller's job (C# side, in the player camera's runtime), not this binding's: scripts
+	/// drive it through SetPosition like any other part, which is what keeps the §1.1 boundary
+	/// intact (no Godot node ever reaches Lua).
+	/// </summary>
+	public int SpawnCapsule(float x, float y, float z) { return Spawn3D(LotObjectKind.Capsule, new Vector3(x, y, z)); }
+
+	/// <summary>
+	/// Moves the object to (x, y, z), relative to the lot origin. Allowed on anchored parts too:
+	/// anchoring controls gravity, not who may write a transform (a script can reposition an
+	/// anchored part; it just will not fall afterwards).
+	/// </summary>
+	public void SetPosition(int handle, float x, float y, float z)
+	{
+		Node3D node = AsNode3D(handle, "SetPosition");
+		if (node != null) node.Position = new Vector3(x, y, z);
+	}
+
+	public float GetPositionX(int handle) { Node3D n = AsNode3D(handle, "GetPositionX"); return n != null ? n.Position.X : 0f; }
+	public float GetPositionY(int handle) { Node3D n = AsNode3D(handle, "GetPositionY"); return n != null ? n.Position.Y : 0f; }
+	public float GetPositionZ(int handle) { Node3D n = AsNode3D(handle, "GetPositionZ"); return n != null ? n.Position.Z : 0f; }
+
+	/// <summary>Sets the object's rotation in degrees, relative to the lot origin.</summary>
+	public void SetRotationDeg(int handle, float x, float y, float z)
+	{
+		Node3D node = AsNode3D(handle, "SetRotationDeg");
+		if (node != null) node.RotationDegrees = new Vector3(x, y, z);
+	}
+
+	public float GetRotationXDeg(int handle) { Node3D n = AsNode3D(handle, "GetRotationXDeg"); return n != null ? n.RotationDegrees.X : 0f; }
+	public float GetRotationYDeg(int handle) { Node3D n = AsNode3D(handle, "GetRotationYDeg"); return n != null ? n.RotationDegrees.Y : 0f; }
+	public float GetRotationZDeg(int handle) { Node3D n = AsNode3D(handle, "GetRotationZDeg"); return n != null ? n.RotationDegrees.Z : 0f; }
+
+	/// <summary>
+	/// Sets the object's scale (1 = natural size). A plain Node3D transform: on a part, prefer
+	/// <see cref="SetSize"/> — scale stretches the part's baked world-unit UVs and moves the
+	/// collision hull with it, while SetSize regenerates the mesh so texture density stays fixed.
+	/// </summary>
+	public void SetScale(int handle, float x, float y, float z)
+	{
+		Node3D node = AsNode3D(handle, "SetScale");
+		if (node != null) node.Scale = new Vector3(x, y, z);
+	}
+
+	public float GetScaleX(int handle) { Node3D n = AsNode3D(handle, "GetScaleX"); return n != null ? n.Scale.X : 1f; }
+	public float GetScaleY(int handle) { Node3D n = AsNode3D(handle, "GetScaleY"); return n != null ? n.Scale.Y : 1f; }
+	public float GetScaleZ(int handle) { Node3D n = AsNode3D(handle, "GetScaleZ"); return n != null ? n.Scale.Z : 1f; }
+
+	/// <summary>
+	/// Resizes a sized part (cube/sphere/cylinder/wedge) by regenerating its mesh and collision
+	/// hull at (x, y, z) world units — the resize every editor path uses, so node scale stays 1
+	/// and a texture keeps its density. Values are clamped (magnitude, factory floor/ceiling).
+	/// Refused with a warning on a fixed-shape object (plane/capsule/decal).
+	/// </summary>
+	public void SetSize(int handle, float x, float y, float z)
+	{
+		LotObject part = AsPart(handle, "SetSize");
+		if (part == null) return;
+		if (!part.SetSize(new Vector3(x, y, z)))
+		{
+			Warn("[LotLuaApi] SetSize: handle " + handle + " (" + part.Kind + ") has no authored size");
+		}
+	}
+
+	public float GetSizeX(int handle) { return SizeComponent(handle, "GetSizeX", 0); }
+	public float GetSizeY(int handle) { return SizeComponent(handle, "GetSizeY", 1); }
+	public float GetSizeZ(int handle) { return SizeComponent(handle, "GetSizeZ", 2); }
+
+	private float SizeComponent(int handle, string api, int axis)
+	{
+		LotObject part = AsPart(handle, api);
+		if (part == null) return 0f;
+		if (!part.HasSize)
+		{
+			Warn("[LotLuaApi] " + api + ": handle " + handle + " (" + part.Kind + ") has no authored size");
+			return 0f;
+		}
+		Vector3 size = part.Size;
+		return axis == 0 ? size.X : (axis == 1 ? size.Y : size.Z);
+	}
+
+	// --- Part properties (milestone 2.3) ---
+	// Verb-first, primitives-only bindings for the properties the Inspector edits, so creator
+	// scripts read and write exactly the same state the editor shows (never a Godot object; a
+	// texture is addressed by its opaque asset id). Names are kept in step with the descriptor ids
+	// in LotPropertyRegistry, which is the single declaration table.
+
+	/// <summary>
+	/// Anchors or unanchors the part. Anchored parts stay in place; unanchored parts are affected
+	/// by gravity in a player session (the dynamic-body layer lands with §3.6). Both states still
+	/// accept transform writes from scripts — anchoring controls gravity, not who may move a part.
+	/// </summary>
+	public void SetAnchored(int handle, bool anchored)
+	{
+		LotObject part = AsPart(handle, "SetAnchored");
+		if (part != null) part.SetAnchored(anchored);
+	}
+
+	/// <summary>True while the part is anchored. False for a missing handle.</summary>
+	public bool IsAnchored(int handle)
+	{
+		LotObject part = AsPart(handle, "IsAnchored");
+		return part != null && part.Anchored;
+	}
+
+	/// <summary>
+	/// Sets whether the part blocks other objects. When off, solid things pass through it; the part
+	/// stays selectable and draggable in the editor.
+	/// </summary>
+	public void SetCanCollide(int handle, bool canCollide)
+	{
+		LotObject part = AsPart(handle, "SetCanCollide");
+		if (part != null) part.SetCanCollide(canCollide);
+	}
+
+	/// <summary>True while the part blocks other objects. False for a missing handle.</summary>
+	public bool GetCanCollide(int handle)
+	{
+		LotObject part = AsPart(handle, "GetCanCollide");
+		return part != null && part.CanCollide;
+	}
+
+	/// <summary>
+	/// Assigns the part's named collision group (milestone 3.5). Valid names are those on
+	/// <see cref="LotCollisionGroups.Names"/> ("Default", "Terrain", "Character", ...). An unknown
+	/// name is ignored (the part keeps its group), so a typo cannot silently drop it off the physics
+	/// layers. Which groups interact is set with <see cref="SetGroupsCollidable"/>, not here.
+	///
+	/// Side effect: the part's collision layer becomes the group's bit and its mask becomes the
+	/// group's row of the interaction matrix.
+	/// </summary>
+	public void SetCollisionGroup(int handle, string group)
+	{
+		LotObject part = AsPart(handle, "SetCollisionGroup");
+		if (part == null) return;
+		if (!LotCollisionGroups.IsKnown(group))
+		{
+			Warn("[LotLuaApi] SetCollisionGroup: unknown group '" + group + "'; the part stays '" +
+				part.CollisionGroup + "'");
+			return;
+		}
+		part.SetCollisionGroup(group);
+	}
+
+	/// <summary>The part's named collision group, or "" for a missing handle.</summary>
+	public string GetCollisionGroup(int handle)
+	{
+		LotObject part = AsPart(handle, "GetCollisionGroup");
+		return part != null ? part.CollisionGroup : "";
+	}
+
+	/// <summary>
+	/// Turns interaction between two named groups on or off, for the whole lot. Returns false when
+	/// either name is unknown, so a script can tell a typo from a success.
+	///
+	/// Authority (§1.3): this changes what collides for everyone, so it is host-authoritative —
+	/// over a network a client must send it through <c>net.server</c>, and only the host's copy is
+	/// trusted. In single-player and Test mode there is no peer, so it applies directly.
+	///
+	/// Side effect: every part's collision mask is recomputed (an O(parts) walk, not per-frame).
+	/// </summary>
+	public bool SetGroupsCollidable(string groupA, string groupB, bool collides)
+	{
+		if (!LotCollisionGroups.SetCollidesByName(groupA, groupB, collides)) return false;
+		if (_scene != null) _scene.RefreshCollision();
+		return true;
+	}
+
+	/// <summary>True when two named groups interact. False when either name is unknown.</summary>
+	public bool GetGroupsCollidable(string groupA, string groupB)
+	{
+		return LotCollisionGroups.GetCollidesByName(groupA, groupB);
+	}
+
+	// --- mechanical constraints (§3.6) -------------------------------------------------------------
+	//
+	// Welds and hinges are created/edited here exactly as the editor creates them; the records are
+	// the source of truth and the engine builds joints from them on session entry (and rebuilds on
+	// any change made while a session runs). Authority (§1.3): these mutate the lot, so over a
+	// network the host is the writer — send them through net.server, never trust a client's copy.
+
+	/// <summary>
+	/// Welds two parts: they keep the relative position/orientation they have right now and move as
+	/// one from then on. Returns the link's id, or -1 when a handle is not a part (or both handles
+	/// are the same part). Welding an already-welded pair returns the existing link rather than
+	/// stacking a second one.
+	///
+	/// Side effect: entering a player session rebuilds the lot's joints, so an unanchored pair
+	/// starts moving as one from the next session on (and immediately if one is already running).
+	/// </summary>
+	public int WeldParts(int handleA, int handleB)
+	{
+		LotObject partA = AsPart(handleA, "WeldParts");
+		LotObject partB = AsPart(handleB, "WeldParts");
+		if (partA == null || partB == null) return -1;
+		if (handleA == handleB)
+		{
+			Warn("[LotLuaApi] WeldParts: a part cannot be welded to itself");
+			return -1;
+		}
+
+		LotConstraintRecord existing = LotConstraints.FindWeld(handleA, handleB);
+		if (existing != null) return existing.Id;
+
+		LotConstraints.CanonicalPair(handleA, handleB, out int first, out int second);
+		LotConstraintRecord record = LotConstraints.Add(new LotConstraintRecord
+		{
+			Kind = LotConstraintKind.Weld,
+			A = first,
+			B = second
+		});
+		if (_scene != null) _scene.RebuildConstraints();
+		return record.Id;
+	}
+
+	/// <summary>Removes the weld between two parts (pair order does not matter). False when there is none.</summary>
+	public bool Unweld(int handleA, int handleB)
+	{
+		LotConstraintRecord record = LotConstraints.FindWeld(handleA, handleB);
+		if (record == null) return false;
+		LotConstraints.Remove(record.Id);
+		if (_scene != null) _scene.RebuildConstraints();
+		return true;
+	}
+
+	/// <summary>True when an enabled weld holds between the two parts.</summary>
+	public bool IsWelded(int handleA, int handleB)
+	{
+		return LotConstraints.IsWelded(handleA, handleB);
+	}
+
+	private static bool TryParseHingeAxis(string axis, out Vector3 parsed)
+	{
+		parsed = Vector3.Up;
+		string normalized = (axis ?? "").Trim().ToLowerInvariant();
+		if (normalized == "x") { parsed = Vector3.Right; return true; }
+		if (normalized == "y") { parsed = Vector3.Up; return true; }
+		if (normalized == "z") { parsed = Vector3.Back; return true; }
+		// The negative spellings come free with a free-direction axis, so they are accepted too.
+		if (normalized == "-x") { parsed = Vector3.Left; return true; }
+		if (normalized == "-y") { parsed = Vector3.Down; return true; }
+		if (normalized == "-z") { parsed = Vector3.Forward; return true; }
+		return false;
+	}
+
+	/// <summary>
+	/// Creates a hinge between two parts, or between a part and the world (-1 as the second side) —
+	/// the "door in an invisible wall" form. The pivot is a world-space point (usually where the
+	/// ray hit the first part); it is stored relative to that part, so moving the part carries the
+	/// hinge along. Returns the link's id, or -1 for a bad handle or an unknown axis.
+	///
+	/// Axis is "x", "y", "z" (or "-x"/"-y"/"-z") in the first part's frame. For any other direction
+	/// — an angled hinge — create it and aim it with <see cref="SetHingeAxis"/>, or use the editor's
+	/// sharp axis tools. The hinge starts free (no limits, no motor); shape it with
+	/// <see cref="SetHingeLimits"/> and <see cref="SetHingeMotor"/>.
+	/// </summary>
+	public int CreateHinge(int handleA, int handleB, string axis, float px, float py, float pz)
+	{
+		LotObject partA = AsPart(handleA, "CreateHinge");
+		if (partA == null) return -1;
+		if (handleB != LotConstraintRecord.WorldHandle)
+		{
+			LotObject partB = AsPart(handleB, "CreateHinge");
+			if (partB == null) return -1;
+			if (handleA == handleB)
+			{
+				Warn("[LotLuaApi] CreateHinge: a part cannot be hinged to itself");
+				return -1;
+			}
+		}
+
+		Vector3 parsed;
+		if (!TryParseHingeAxis(axis, out parsed))
+		{
+			Warn("[LotLuaApi] CreateHinge: unknown axis '" + axis + "' (use \"x\", \"y\" or \"z\")");
+			return -1;
+		}
+
+		LotConstraintRecord record = LotConstraints.Add(new LotConstraintRecord
+		{
+			Kind = LotConstraintKind.Hinge,
+			A = handleA,
+			B = handleB,
+			Axis = parsed,
+			Pivot = partA.GlobalTransform.AffineInverse() * new Vector3(px, py, pz)
+		});
+		if (_scene != null) _scene.RebuildConstraints();
+		return record.Id;
+	}
+
+	/// <summary>
+	/// Sets a hinge's angular limits in degrees (relative to the pose captured when the session
+	/// built the joint). Pass <paramref name="enabled"/> false for a free hinge. Lower/upper are
+	/// swapped when handed in reversed, so a limit can never be built inside-out. False for an
+	/// unknown id or a non-hinge link.
+	/// </summary>
+	public bool SetHingeLimits(int id, float lowerDeg, float upperDeg, bool enabled)
+	{
+		LotConstraintRecord record = LotConstraints.Find(id);
+		if (record == null || record.Kind != LotConstraintKind.Hinge) return false;
+		if (lowerDeg > upperDeg)
+		{
+			float swap = lowerDeg;
+			lowerDeg = upperDeg;
+			upperDeg = swap;
+		}
+		record.LowerDeg = lowerDeg;
+		record.UpperDeg = upperDeg;
+		record.LimitsEnabled = enabled;
+		if (_scene != null && _scene.ConstraintSession != null) _scene.ConstraintSession.ApplyHingeParams(id);
+		return true;
+	}
+
+	/// <summary>
+	/// Drives a hinge: mode "off" is a free hinge, "spin" turns it at
+	/// <paramref name="velocity"/> degrees/second with at most <paramref name="maxPush"/> impulse
+	/// (0 = unlimited, per Godot). Negative velocity reverses. False for an unknown id, a non-hinge
+	/// link, or an unknown mode — so a typo cannot silently stop a motor.
+	/// </summary>
+	public bool SetHingeMotor(int id, string mode, float velocity, float maxPush)
+	{
+		LotConstraintRecord record = LotConstraints.Find(id);
+		if (record == null || record.Kind != LotConstraintKind.Hinge) return false;
+
+		string normalized = (mode ?? "").Trim().ToLowerInvariant();
+		if (normalized == "off") record.Motor = HingeMotorMode.Off;
+		else if (normalized == "spin") record.Motor = HingeMotorMode.Spin;
+		else
+		{
+			Warn("[LotLuaApi] SetHingeMotor: unknown mode '" + mode + "' (use \"off\" or \"spin\")");
+			return false;
+		}
+		record.MotorVelocity = velocity;
+		record.MotorMaxPush = Mathf.Max(0f, maxPush);
+		if (_scene != null && _scene.ConstraintSession != null) _scene.ConstraintSession.ApplyHingeParams(id);
+		return true;
+	}
+
+	/// <summary>
+	/// Aims a hinge's axis at (x, y, z) in world space — any direction, which is the point of this
+	/// verb: the string form on <see cref="CreateHinge"/> only spells the six axis directions, and
+	/// an angled hinge needs this. The vector is normalized; a zero vector is refused (with a
+	/// warning) rather than guessed at. False for an unknown id or a non-hinge link. Rebuilds the
+	/// session's joints, so it applies live inside a running session too.
+	/// </summary>
+	public bool SetHingeAxis(int id, float x, float y, float z)
+	{
+		LotConstraintRecord record = LotConstraints.Find(id);
+		if (record == null || record.Kind != LotConstraintKind.Hinge) return false;
+
+		Vector3 axis;
+		if (!HingeAxisMath.TryNormalize(new Vector3(x, y, z), out axis))
+		{
+			Warn("[LotLuaApi] SetHingeAxis: the axis must be a non-zero direction");
+			return false;
+		}
+		record.Axis = axis;
+		if (_scene != null) _scene.RebuildConstraints();
+		return true;
+	}
+
+	/// <summary>Removes any constraint (weld or hinge) by id. False for an unknown id.</summary>
+	public bool RemoveConstraint(int id)
+	{
+		if (!LotConstraints.Remove(id)) return false;
+		if (_scene != null) _scene.RebuildConstraints();
+		return true;
+	}
+
+	/// <summary>
+	/// Applies a texture by asset id ("" clears it). Returns true when the id was applied, false
+	/// when it is unknown — so a script can tell a typo from a success. Asset ids are opaque; get
+	/// one from the Inspector's Texture dropdown or from <see cref="GetTexture"/>.
+	/// </summary>
+	public bool SetTexture(int handle, string assetId)
+	{
+		LotObject part = AsPart(handle, "SetTexture");
+		if (part == null) return false;
+		return part.SetTexture(assetId);
+	}
+
+	/// <summary>The part's texture asset id, or "" when it has none.</summary>
+	public string GetTexture(int handle)
+	{
+		LotObject part = AsPart(handle, "GetTexture");
+		return part != null ? part.TextureId : "";
+	}
+
+	/// <summary>
+	/// Sets how many texture repeats one world unit of the part shows (default 1). Regenerates
+	/// the part's mesh, so the tiling applies to every face uniformly. Refused with a warning on
+	/// a fixed-shape object (plane/capsule/decal).
+	/// </summary>
+	public void SetTilesPerUnit(int handle, float tilesPerUnit)
+	{
+		LotObject part = AsPart(handle, "SetTilesPerUnit");
+		if (part == null) return;
+		if (!part.SetTilesPerUnit(tilesPerUnit))
+		{
+			Warn("[LotLuaApi] SetTilesPerUnit: handle " + handle + " (" + part.Kind + ") has no authored size");
+		}
+	}
+
+	/// <summary>How many texture repeats one world unit of the part shows.</summary>
+	public float GetTilesPerUnit(int handle)
+	{
+		LotObject part = AsPart(handle, "GetTilesPerUnit");
+		return part != null ? part.TextureTilesPerUnit : 1f;
+	}
+
+	/// <summary>
+	/// Stretches the part's texture across each face instead of repeating it per world unit
+	/// (the pre-migration look), or turns that off again. Refused with a warning on a fixed-shape
+	/// object.
+	/// </summary>
+	public void SetTextureStretch(int handle, bool stretch)
+	{
+		LotObject part = AsPart(handle, "SetTextureStretch");
+		if (part == null) return;
+		if (!part.SetTextureStretch(stretch))
+		{
+			Warn("[LotLuaApi] SetTextureStretch: handle " + handle + " (" + part.Kind + ") has no authored size");
+		}
+	}
+
+	/// <summary>True when the part's texture is stretched across each face (0..1).</summary>
+	public bool GetTextureStretch(int handle)
+	{
+		LotObject part = AsPart(handle, "GetTextureStretch");
+		return part != null && part.TextureStretch;
+	}
+
+	// --- Decals (milestone 2.6) ---
+	// A decal is an image patch on ONE face of a part. It is spawned into a host part and stays
+	// parented to it, so the image follows the part. Every value is a primitive (a face name and an
+	// opaque asset id), every write goes through the part's own clamping methods, and the same
+	// state is what the Inspector's Decal section edits.
+
+	/// <summary>
+	/// Spawns an image decal on the part with the given handle, parented to it. Returns the decal's
+	/// handle, or -1 when the handle is not a part (a decal cannot host another decal). The new
+	/// decal starts as a plain white half-size square on the part's +Z (front) face until an image
+	/// is set with <see cref="SetDecalTexture"/>.
+	/// </summary>
+	public int SpawnDecal(int hostHandle)
+	{
+		if (_scene == null) return -1;
+		LotObject host = AsPart(hostHandle, "SpawnDecal");
+		if (host == null) return -1;
+		if (host.Kind == LotObjectKind.Decal)
+		{
+			Warn("[LotLuaApi] SpawnDecal: a decal cannot host another decal");
+			return -1;
+		}
+
+		LotObject decal = _scene.SpawnDecal(host);
+		int handle = _scene.RegisterHandle(decal);
+		TagLoadTimeSpawn(decal);
+		return handle;
+	}
+
+	/// <summary>
+	/// Moves the decal to another face of its host: one of "+Z", "-Z", "+X", "-X", "+Y", "-Y" (the
+	/// Inspector's Face list). Returns false for a bad handle or an unknown face name, so a script
+	/// can tell a typo from a success.
+	/// </summary>
+	public bool SetDecalFace(int handle, string face)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalFace");
+		if (decal == null) return false;
+		return decal.SetDecalFace(DecalMath.FaceIndex(face));
+	}
+
+	/// <summary>The decal's current face name ("+Z" .. "-Y"), or "" for a bad handle.</summary>
+	public string GetDecalFace(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalFace");
+		return decal != null ? DecalMath.FaceNames[decal.DecalFace] : "";
+	}
+
+	/// <summary>
+	/// Sets the decal's image by asset id ("" clears it back to a plain square). Returns false when
+	/// the id is unknown — the same contract as <see cref="SetTexture"/>. The image's transparent
+	/// areas stay transparent on the part.
+	/// </summary>
+	public bool SetDecalTexture(int handle, string assetId)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalTexture");
+		return decal != null && decal.SetTexture(assetId);
+	}
+
+	/// <summary>The decal's image asset id, or "" when it has none.</summary>
+	public string GetDecalTexture(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalTexture");
+		return decal != null ? decal.TextureId : "";
+	}
+
+	/// <summary>
+	/// Slides the image across its face, in fractions of the face: u is horizontal, v vertical
+	/// (-0.5 .. 0.5). Both values are clamped so the image stays entirely on the face.
+	/// </summary>
+	public void SetDecalOffset(int handle, float u, float v)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalOffset");
+		if (decal == null) return;
+		decal.SetDecalOffsetU(u);
+		decal.SetDecalOffsetV(v);
+	}
+
+	/// <summary>Horizontal slide of the image (-0.5 .. 0.5 of the face width). 0 for a bad handle.</summary>
+	public float GetDecalOffsetU(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalOffsetU");
+		return decal != null ? decal.DecalOffsetU : 0f;
+	}
+
+	/// <summary>Vertical slide of the image (-0.5 .. 0.5 of the face height). 0 for a bad handle.</summary>
+	public float GetDecalOffsetV(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalOffsetV");
+		return decal != null ? decal.DecalOffsetV : 0f;
+	}
+
+	/// <summary>
+	/// Sizes the image as a fraction of its face (0.05 .. 1); the offset is re-clamped because a
+	/// bigger image has less room to move. Returns silently for a bad handle.
+	/// </summary>
+	public void SetDecalScale(int handle, float u, float v)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalScale");
+		if (decal == null) return;
+		decal.SetDecalScaleU(u);
+		decal.SetDecalScaleV(v);
+	}
+
+	/// <summary>Image width as a fraction of the face width (0.05 .. 1). 0 for a bad handle.</summary>
+	public float GetDecalScaleU(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalScaleU");
+		return decal != null ? decal.DecalScaleU : 0f;
+	}
+
+	/// <summary>Image height as a fraction of the face height (0.05 .. 1). 0 for a bad handle.</summary>
+	public float GetDecalScaleV(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalScaleV");
+		return decal != null ? decal.DecalScaleV : 0f;
+	}
+
+	/// <summary>
+	/// Sets how solid the decal's image is (0 invisible .. 1 opaque, clamped). Transparent pixels
+	/// of the image stay transparent at any opacity, so this fades the whole patch.
+	/// </summary>
+	public void SetDecalOpacity(int handle, float opacity)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalOpacity");
+		if (decal != null) decal.SetDecalOpacity(opacity);
+	}
+
+	/// <summary>The decal's opacity (0 .. 1). 0 for a bad handle.</summary>
+	public float GetDecalOpacity(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalOpacity");
+		return decal != null ? decal.DecalOpacity : 0f;
+	}
+
+	// --- Decal panel content (on-face UI) ---
+
+	/// <summary>
+	/// Switches what the panel draws: "Image", "Text", "Button" or "Scrollbar". False for a bad
+	/// handle or an unknown name. Button and Scrollbar are drawn and configurable; their click
+	/// handling waits on the event system (§3.7).
+	/// </summary>
+	public bool SetDecalContent(int handle, string content)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalContent");
+		if (decal == null) return false;
+		return decal.SetDecalContent(DecalMath.ContentIndex(content));
+	}
+
+	/// <summary>The panel's content name, or "" for a bad handle.</summary>
+	public string GetDecalContent(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalContent");
+		return decal != null ? DecalMath.ContentNames[(int)decal.Content] : "";
+	}
+
+	/// <summary>Sets the text a Text or Button panel shows (wraps at the panel's edge).</summary>
+	public void SetDecalText(int handle, string text)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalText");
+		if (decal != null) decal.SetDecalText(text);
+	}
+
+	/// <summary>The panel's text, or "" when it has none (or for a bad handle).</summary>
+	public string GetDecalText(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalText");
+		return decal != null ? decal.DecalText : "";
+	}
+
+	/// <summary>Sets the scrollbar thumb position, 0 (top) .. 1 (bottom), clamped.</summary>
+	public void SetDecalScroll(int handle, float value)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalScroll");
+		if (decal != null) decal.SetDecalScroll(value);
+	}
+
+	/// <summary>The scrollbar thumb position (0 .. 1). 0 for a bad handle.</summary>
+	public float GetDecalScroll(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalScroll");
+		return decal != null ? decal.DecalScroll : 0f;
+	}
+
+	/// <summary>Sets the label font size (8 .. 160), clamped. One line takes FontSize/160 of the
+	/// panel's height, so the text scales with the panel and with the part.</summary>
+	public void SetDecalFontSize(int handle, float size)
+	{
+		LotObject decal = AsDecal(handle, "SetDecalFontSize");
+		if (decal != null) decal.SetDecalFontSize(size);
+	}
+
+	/// <summary>The label font size (8 .. 160). 0 for a bad handle.</summary>
+	public float GetDecalFontSize(int handle)
+	{
+		LotObject decal = AsDecal(handle, "GetDecalFontSize");
+		return decal != null ? decal.DecalFontSize : 0f;
+	}
+
+	/// <summary>Sets the mesh color (0..1 floats). Only applies to 3D parts.</summary>
+	public void SetColor(int handle, float r, float g, float b)
+	{
+		Node node = Resolve(handle, "SetColor");
+		LotObject lotObject = node as LotObject;
+		if (lotObject != null) lotObject.Color = new Color(r, g, b);
+		else WarnMissing(handle, "SetColor");
+	}
+
+	/// <summary>Renames the object in the hierarchy.</summary>
+	public void SetName(int handle, string name)
+	{
+		Node node = Resolve(handle, "SetName");
+		if (node != null && !string.IsNullOrWhiteSpace(name)) node.Name = name.Trim();
+	}
+
+	public string GetName(int handle)
+	{
+		Node node = Resolve(handle, "GetName");
+		return node != null ? node.Name.ToString() : "";
+	}
+
+	/// <summary>Resolves an entity name to its handle, so a script can address another entity by
+	/// name rather than a hardcoded number. Returns the FIRST entity with that name in lot order
+	/// (the lowest handle) and -1 when nothing matches. Names are only unique among siblings, so
+	/// when several entities share a name the earliest one wins silently (rule A). Entities only —
+	/// script placeholders and internal children are not addressable. The inverse of
+	/// <see cref="GetName(int)"/>.</summary>
+	public int GetHandle(string name)
+	{
+		if (_scene == null || string.IsNullOrEmpty(name)) return -1;
+		return _scene.FindHandleByName(name);
+	}
+
+	/// <summary>Destroys the object. Its handle becomes invalid afterwards.</summary>
+	public void DestroyObject(int handle)
+	{
+		Node node = Resolve(handle, "DestroyObject");
+		if (node == null) return;
+		// The single destroy path: it forgets the handle, drops the entity's net bookkeeping and
+		// releases the part's texture reference, all of which a bare QueueFree would leave behind.
+		_scene.DestroyEntity(node);
+	}
+
+	// --- UI elements ---
+
+	/// <summary>Spawns a UI frame at (x, y) with the given size. Returns its handle, or -1.</summary>
+	public int SpawnUIFrame(float x, float y, float w, float h) { return SpawnUiInternal(LotUIKind.Frame, new Vector2(x, y), new Vector2(w, h), ""); }
+
+	/// <summary>Spawns a UI button with the given label. Returns its handle, or -1.</summary>
+	public int SpawnUIButton(float x, float y, float w, float h, string label) { return SpawnUiInternal(LotUIKind.Button, new Vector2(x, y), new Vector2(w, h), label); }
+
+	/// <summary>Spawns a UI text label at (x, y). Returns its handle, or -1.</summary>
+	public int SpawnUIText(float x, float y, string label) { return SpawnUiInternal(LotUIKind.Text, new Vector2(x, y), LotUiRenderer.DefaultSize(LotUIKind.Text), label); }
+
+	/// <summary>Spawns a UI scrollbar at (x, y) with the given size. Returns its handle, or -1.</summary>
+	public int SpawnUIScrollbar(float x, float y, float w, float h) { return SpawnUiInternal(LotUIKind.Scrollbar, new Vector2(x, y), new Vector2(w, h), ""); }
+
+	/// <summary>Sets the label text of a Button or Text element.</summary>
+	public void SetUIText(int handle, string text)
+	{
+		LotUIElement el = AsUiElement(handle, "SetUIText");
+		if (el != null) el.Label = text;
+	}
+
+	public string GetUIText(int handle)
+	{
+		LotUIElement el = AsUiElement(handle, "GetUIText");
+		return el != null ? el.Label : "";
+	}
+
+	/// <summary>Sets the element color (0..1 floats).</summary>
+	public void SetUIColor(int handle, float r, float g, float b, float a)
+	{
+		LotUIElement el = AsUiElement(handle, "SetUIColor");
+		if (el != null) el.Color = new Color(r, g, b, a);
+	}
+
+	/// <summary>Sets the element rect (x, y from the viewport top-left corner, Y down). Clamped so a
+	/// script cannot place an element outside the viewport picture frame.</summary>
+	public void SetUIRect(int handle, float x, float y, float w, float h)
+	{
+		LotUIElement el = AsUiElement(handle, "SetUIRect");
+		if (el != null)
+		{
+			Vector2 pos = new Vector2(x, y);
+			Vector2 size = new Vector2(w, h);
+			UiGizmoMath.ClampRect(ref pos, ref size, _scene.UiCanvasBounds);
+			el.Position = pos;
+			el.Size = size;
+		}
+	}
+
+	/// <summary>
+	/// Prints a message to the Output window and the engine console — the destination of a script's
+	/// <c>log(...)</c> and <c>print(...)</c>. Creator-side logging, so it is an Info entry, not a
+	/// warning.
+	/// </summary>
+	public void Log(string message)
+	{
+		LotLog.Info("log", message);
+		GD.Print("[Lot] " + message);
+	}
+
+	// --- net.* plumbing ---
+	//
+	// These two are NOT creator API: LuaManager registers them as globals (the bootstrap calls
+	// them by name) but keeps them out of the documented Lot table. The bootstrap is the only
+	// caller — see LuaBootstrap.Chunk for the sugar that reaches them.
+
+	/// <summary>The net bridge, assigned by LuaManager once the runtime is up (null before then).</summary>
+	public LuaNetBridge Net { get; set; }
+
+	/// <summary>
+	/// The Lua state this API is bound to, handed over by <see cref="LuaManager.Initialize"/> the
+	/// same way <see cref="Net"/> is (and re-assigned by a VM rebuild, for the same reason).
+	/// It exists for one job in milestone 3.11: <see cref="Raycast"/> returns its hit as a real Lua
+	/// table, and NLua can only build one through the state it belongs to — a returned Dictionary
+	/// would reach the script as opaque userdata (spike-verified against NLua 1.7.9).
+	/// </summary>
+	public NLua.Lua Lua { get; set; }
+
+	/// <summary>Records a net.* declaration so the router can warn when two scripts share a name.
+	/// Called by the bootstrap's __newindex trap only.</summary>
+	public void NetRegister(int handle, string direction, string name, string scriptName)
+	{
+		if (Net == null) return;
+		Net.RegisterHandler(handle, direction, name, scriptName);
+	}
+
+	/// <summary>
+	/// Cross-entity call (step 5): invokes the TARGET handle's net.server function through the same
+	/// router/queue/envelope path as the caller's own net.* table. From a client the call goes to
+	/// the host; from the host it is queued locally. Unknown handles/names warn and drop.
+	/// Creator-facing form is the vararg sugar in the bootstrap (Lot.CallServer(handle, name, ...));
+	/// this raw form takes a packed { n = count, ... } table.
+	/// </summary>
+	public void CallServer(int handle, string name, NLua.LuaTable args)
+	{
+		RouteCrossEntity(handle, NetDirection.Server, name, args);
+	}
+
+	/// <summary>Cross-entity call to the TARGET handle's net.client function: the host broadcasts
+	/// it (and runs it locally, since the host is a player too); a client runs it locally for its
+	/// own view only — clients never route to other clients.</summary>
+	public void CallClient(int handle, string name, NLua.LuaTable args)
+	{
+		RouteCrossEntity(handle, NetDirection.Client, name, args);
+	}
+
+	private void RouteCrossEntity(int handle, NetDirection direction, string name, NLua.LuaTable args)
+	{
+		if (Net == null)
+		{
+			Warn("[LotLuaApi] net bridge is not ready; dropped cross-entity call " + name);
+			if (args != null) args.Dispose();
+			return;
+		}
+		Net.InvokeCrossEntity(handle, direction, name, args);
+	}
+
+	/// <summary>Funnels one net.* call from the bootstrap (args packed as { n = count, ... }).
+	/// Serialization errors throw NetSerializationException, which surfaces in the calling script.</summary>
+	public void NetInvoke(int handle, string direction, string name, NLua.LuaTable args)
+	{
+		if (Net == null)
+		{
+			Warn("[LotLuaApi] net bridge is not ready; dropped net." + direction + "." + name);
+			if (args != null) args.Dispose();
+			return;
+		}
+		Net.InvokeFromLua(handle, direction, name, args);
+	}
+
+	// --- event-subscription plumbing (milestone 3.7) ---
+	//
+	// These two are NOT creator API: the bootstrap's per-env Subscribe sugar calls them by name
+	// (like NetInvoke/NetRegister) and LuaManager keeps them out of the documented Lot table. The
+	// callback itself never crosses this boundary — it stays in the bootstrap's Lua-side registry
+	// (design doc D4) — so this pair only mirrors subscription presence into the C#
+	// LotEventRegistry, which owns presence, sensors and delivery.
+
+	/// <summary>Records that <paramref name="handle"/> watches <paramref name="eventName"/> on
+	/// <paramref name="targetHandle"/>. Called by the bootstrap's Subscribe sugar only (idempotent:
+	/// the sugar calls it on both its append and replace paths); a refusal (bad handle, unknown
+	/// event) is warned about by the registry and otherwise ignored.</summary>
+	public void SubscribeEvent(int handle, int targetHandle, string eventName)
+	{
+		if (_scene == null || _scene.Events == null) return;
+		_scene.Events.Subscribe(handle, targetHandle, eventName);
+	}
+
+	/// <summary>Removes one (subscriber, subject, event) subscription. Called by the bootstrap's
+	/// cancel token only, and only once no script on the entity still watches the pair.</summary>
+	public void UnsubscribeEvent(int handle, int targetHandle, string eventName)
+	{
+		if (_scene == null || _scene.Events == null) return;
+		_scene.Events.Unsubscribe(handle, targetHandle, eventName);
+	}
+
+	// --- tween/timer plumbing (milestone 3.8) ---
+	//
+	// These three are NOT creator API: the bootstrap's Lot.Tween* overrides and the per-env
+	// After/Every sugar call them by name (like NetInvoke and the event pair) and LuaManager keeps
+	// them out of the documented Lot table. The callback for a timer never crosses this boundary
+	// — it stays in the bootstrap's timerFnRegistry and is reached through __openlot_callTimer.
+
+	/// <summary>Schedules one tween (bootstrap sugar only). Returns the id a cancel token uses,
+	/// or -1 when it was refused (unknown kind/easing, bad target, full schedule).</summary>
+	public int ScheduleTween(int handle, string kind, float a, float b, float c, float d,
+		float duration, string easing)
+	{
+		if (_scene == null || _scene.Scheduler == null) return -1;
+		return _scene.Scheduler.ScheduleTween(handle, kind, a, b, c, d, duration, easing);
+	}
+
+	/// <summary>Schedules one timer (bootstrap sugar only). Returns the id a cancel token uses,
+	/// or -1 when the schedule is full.</summary>
+	public int ScheduleTimer(int handle, float delay, bool repeating, float interval)
+	{
+		if (_scene == null || _scene.Scheduler == null) return -1;
+		return _scene.Scheduler.ScheduleTimer(handle, delay, repeating, interval);
+	}
+
+	/// <summary>Cancels one scheduled tween/timer by id (bootstrap tokens only). False when it is
+	/// already gone — tokens stay harmless no-ops after completion.</summary>
+	public bool CancelScheduled(int id)
+	{
+		if (_scene == null || _scene.Scheduler == null) return false;
+		return _scene.Scheduler.Cancel(id);
+	}
+
+	// --- input (milestone 3.9) ---
+	//
+	// Creator API. Every read answers from the one per-frame snapshot (LotInputActions.Poll),
+	// never from Input directly, and every read is session-gated: while the creator is building,
+	// keystrokes belong to the editor, so these answer false/0 rather than leak editor input into
+	// scripts. Unknown action names warn and answer false/0, so a typo is visible.
+
+	/// <summary>True while the named action is held this frame (\"moveForward\", \"jump\", ...).</summary>
+	public bool IsActionPressed(string action)
+	{
+		int index = ResolveAction(action, "IsActionPressed");
+		return _scene != null && _scene.InTestMode && LotInputActions.IsPressed(index);
+	}
+
+	/// <summary>True on the frame the named action went down (exactly one frame per press).</summary>
+	public bool WasActionPressed(string action)
+	{
+		int index = ResolveAction(action, "WasActionPressed");
+		return _scene != null && _scene.InTestMode && LotInputActions.WasPressed(index);
+	}
+
+	/// <summary>True on the frame the named action came back up (exactly one frame per release).</summary>
+	public bool WasActionReleased(string action)
+	{
+		int index = ResolveAction(action, "WasActionReleased");
+		return _scene != null && _scene.InTestMode && LotInputActions.WasReleased(index);
+	}
+
+	/// <summary>How strongly the named action is held, 0..1 (a gamepad stick reports its
+	/// deflection; a key reports 1 or 0).</summary>
+	public float GetActionStrength(string action)
+	{
+		int index = ResolveAction(action, "GetActionStrength");
+		return _scene != null && _scene.InTestMode ? LotInputActions.Strength(index) : 0f;
+	}
+
+	/// <summary>Raw mouse motion accumulated this frame (pixels), for custom look code.</summary>
+	public float GetMouseDeltaX()
+	{
+		return _scene != null && _scene.InTestMode ? LotInputActions.MouseDeltaX : 0f;
+	}
+
+	/// <summary>Raw mouse motion accumulated this frame (pixels), for custom look code.</summary>
+	public float GetMouseDeltaY()
+	{
+		return _scene != null && _scene.InTestMode ? LotInputActions.MouseDeltaY : 0f;
+	}
+
+	/// <summary>Wheel steps accumulated this frame (+1 per up notch, -1 per down).</summary>
+	public int GetMouseWheel()
+	{
+		return _scene != null && _scene.InTestMode ? LotInputActions.Wheel : 0;
+	}
+
+	private int ResolveAction(string action, string verb)
+	{
+		int index = LotInputActions.IndexOf(action);
+		if (index < 0)
+		{
+			Warn("[Input] " + verb + ": unknown action '" + (action ?? "") + "'");
+		}
+		return index;
+	}
+
+	// --- camera (milestone 3.10) ---
+	//
+	// Creator API. Camera modes are session-only — the camera belongs to the player session — so
+	// every one of these refuses politely outside one. "scripted" is entered only by FlyCamera;
+	// a direct SetCameraMode("scripted") is refused with a message pointing at FlyCamera.
+
+	/// <summary>Switches the player camera: "thirdperson", "firstperson" or "fixed". False outside
+	/// a session, for an unknown name, or for a direct "scripted" request.</summary>
+	public bool SetCameraMode(string mode)
+	{
+		if (_scene == null || !_scene.InTestMode || _scene.PlayerCamera == null)
+		{
+			Warn("[Camera] SetCameraMode: camera modes live inside a player session");
+			return false;
+		}
+		LotCameraMode parsed;
+		if (!LotCameraMath.TryParseMode(mode ?? "", out parsed) || parsed == LotCameraMode.Scripted)
+		{
+			Warn("[Camera] SetCameraMode: unknown mode '" + (mode ?? "") +
+				"' (use thirdperson/firstperson/fixed, or Lot.FlyCamera for a shot)");
+			return false;
+		}
+		return _scene.ApplyCameraMode(parsed);
+	}
+
+	/// <summary>Where the fixed camera sits (applied live in fixed mode, remembered for the next
+	/// time fixed is entered).</summary>
+	public void SetCameraPosition(float x, float y, float z)
+	{
+		if (_scene == null || _scene.PlayerCamera == null) return;
+		_scene.PlayerCamera.SetFixedPosition(new Vector3(x, y, z));
+	}
+
+	/// <summary>What the fixed camera looks at.</summary>
+	public void SetCameraTarget(float x, float y, float z)
+	{
+		if (_scene == null || _scene.PlayerCamera == null) return;
+		_scene.PlayerCamera.SetFixedTarget(new Vector3(x, y, z));
+	}
+
+	/// <summary>
+	/// Flies the camera from its current pose to (x,y,z) looking at (tx,ty,tz) over duration
+	/// seconds with the easing, then returns to the mode that was active — a cutscene move. Returns
+	/// the shot id for the bootstrap's cancel token (Lot.CancelCameraShot), or -1 when refused.
+	/// </summary>
+	public int FlyCamera(float x, float y, float z, float tx, float ty, float tz, float duration, string easing)
+	{
+		if (_scene == null || !_scene.InTestMode || _scene.PlayerCamera == null)
+		{
+			Warn("[Camera] FlyCamera: camera modes live inside a player session");
+			return -1;
+		}
+		LotEasingKind parsed;
+		if (!LotEasing.TryParse(easing, out parsed))
+		{
+			Warn("[Camera] FlyCamera: unknown easing '" + (easing ?? "") + "'");
+			return -1;
+		}
+		if (duration < 0f)
+		{
+			Warn("[Camera] FlyCamera: duration must not be negative");
+			return -1;
+		}
+		return _scene.PlayerCamera.StartShot(new Vector3(x, y, z), new Vector3(tx, ty, tz), duration, parsed);
+	}
+
+	/// <summary>Cancels the shot with that id, freezing the camera exactly where it is. False for
+	/// a shot that already ended — the token's harmless no-op path.</summary>
+	public bool CancelCameraShot(int id)
+	{
+		if (_scene == null || _scene.PlayerCamera == null) return false;
+		return _scene.PlayerCamera.StopShot(id);
+	}
+
+	/// <summary>The current camera mode's name ("thirdperson" outside a session or before any
+	/// scripted change).</summary>
+	public string GetCameraMode()
+	{
+		if (_scene == null || _scene.PlayerCamera == null) return LotCameraMath.ModeName(LotCameraMode.ThirdPerson);
+		return LotCameraMath.ModeName(_scene.PlayerCamera.Mode);
+	}
+
+	// --- physics (milestone 3.11) ---------------------------------------------------------------
+	//
+	// Raycasts and forces act on the session's physics world, so they refuse outside one — the same
+	// gate the other runtime APIs share. The material property verbs are lot state, not session
+	// actions: they persist with the lot and apply in build mode and play alike, exactly like
+	// anchored/collision group, and they write the same fields the Inspector edits (`friction`,
+	// `bounce`, `mass` in LotPropertyRegistry), so editor and script can never disagree.
+
+	/// <summary>Scratch global name NLua's NewTable/GetTable pairing needs to mint a fresh hit
+	/// table. It is rebound (a new table) per call, never reused, so no two results can alias.</summary>
+	private const string RaycastScratchTable = "__openlot_raycast_hit";
+
+	/// <summary>
+	/// Casts a ray through the lot's physics world and returns what it hit as a table, or nil when
+	/// it hit nothing. Fields: handle (the entity the collider resolves to; -1 for a collider that
+	/// belongs to no lot object), x/y/z (where the ray met the surface), nx/ny/nz (the surface
+	/// normal) and distance (origin to hit). The direction needs no pre-normalizing — it is
+	/// normalized here, so <paramref name="maxDistance"/> is always metres.
+	///
+	/// What it can hit is what the editor can see: every collision group plus non-collidable parts
+	/// (a CanCollide = false part stays hittable by design), bodies only — never an event sensor —
+	/// and never the player's invisible controller body. The character's own capsule still counts,
+	/// as the entity it is.
+	///
+	/// Session-only: outside Test/Game mode there is no running world to cast through, so the call
+	/// warns and returns nil.
+	/// </summary>
+	public object Raycast(float ox, float oy, float oz, float dx, float dy, float dz, float maxDistance)
+	{
+		if (_scene == null || !_scene.InTestMode)
+		{
+			Warn("[LotLuaApi] Raycast: needs a running player session (enter Test or Game mode first)");
+			return null;
+		}
+		if (Lua == null)
+		{
+			Warn("[LotLuaApi] Raycast: the script runtime is not ready");
+			return null;
+		}
+
+		Vector3 origin = new Vector3(ox, oy, oz);
+		Vector3 direction = new Vector3(dx, dy, dz);
+		if (direction.LengthSquared() < 1e-8f)
+		{
+			Warn("[LotLuaApi] Raycast: the direction is zero; give a direction to look along");
+			return null;
+		}
+		if (maxDistance <= 0f)
+		{
+			Warn("[LotLuaApi] Raycast: maxDistance must be positive");
+			return null;
+		}
+
+		Vector3 hitPosition;
+		Vector3 hitNormal;
+		Node collider;
+		if (!PartDragController.Raycast(_scene, origin, direction, maxDistance, out hitPosition, out hitNormal, out collider))
+		{
+			return null;
+		}
+
+		int handle = _scene.ResolveBodyEntity(collider);
+		// A fresh table per call (the NewTable rebinds the scratch global; returned tables stay
+		// independent — spike-verified on NLua 1.7.9), so two results held by a script never alias.
+		Lua.NewTable(RaycastScratchTable);
+		NLua.LuaTable table = Lua.GetTable(RaycastScratchTable);
+		table["handle"] = handle;
+		table["x"] = hitPosition.X;
+		table["y"] = hitPosition.Y;
+		table["z"] = hitPosition.Z;
+		table["nx"] = hitNormal.X;
+		table["ny"] = hitNormal.Y;
+		table["nz"] = hitNormal.Z;
+		table["distance"] = origin.DistanceTo(hitPosition);
+		return table;
+	}
+
+	/// <summary>
+	/// Applies a one-shot impulse to a simulated part — "kick it". The velocity change is the
+	/// impulse divided by the part's mass (so <see cref="SetMass"/> is the weight knob), and the
+	/// body is woken first: an engine-asleep body would swallow the push silently. Returns false
+	/// (with a message) for a missing/anchored part or outside a session — a static body has
+	/// nowhere to carry it.
+	///
+	/// Authority (§1.3): physics is client-local simulation; a kick that must count for everyone
+	/// belongs in a net.server handler.
+	/// </summary>
+	public bool ApplyImpulse(int handle, float x, float y, float z)
+	{
+		RigidBody3D body = AsSimulatedBody(handle, "ApplyImpulse");
+		if (body == null) return false;
+		body.Sleeping = false;
+		body.ApplyCentralImpulse(new Vector3(x, y, z));
+		return true;
+	}
+
+	/// <summary>
+	/// Adds a force to a simulated part for its NEXT physics step — Godot clears accumulated forces
+	/// each step, so sustained thrust means calling this every frame (from `onFrame`, an `Every`
+	/// timer, or a `touched` handler). The body is woken first. False for a missing/anchored part
+	/// or outside a session.
+	/// </summary>
+	public bool ApplyForce(int handle, float x, float y, float z)
+	{
+		RigidBody3D body = AsSimulatedBody(handle, "ApplyForce");
+		if (body == null) return false;
+		body.Sleeping = false;
+		body.ApplyCentralForce(new Vector3(x, y, z));
+		return true;
+	}
+
+	/// <summary>Sets a simulated part's velocity outright (metres/second), waking it. False for a
+	/// missing/anchored part or outside a session.</summary>
+	public bool SetVelocity(int handle, float x, float y, float z)
+	{
+		RigidBody3D body = AsSimulatedBody(handle, "SetVelocity");
+		if (body == null) return false;
+		body.Sleeping = false;
+		body.LinearVelocity = new Vector3(x, y, z);
+		return true;
+	}
+
+	public float GetVelocityX(int handle) { return SimulatedVelocity(handle, "GetVelocityX").X; }
+	public float GetVelocityY(int handle) { return SimulatedVelocity(handle, "GetVelocityY").Y; }
+	public float GetVelocityZ(int handle) { return SimulatedVelocity(handle, "GetVelocityZ").Z; }
+
+	/// <summary>The live simulated body a force/velocity verb should act on, or null with a
+	/// warning: outside a session, a bad handle, or a part whose body is static (anchored — or the
+	/// session never swapped it in).</summary>
+	private RigidBody3D AsSimulatedBody(int handle, string api)
+	{
+		if (_scene == null || !_scene.InTestMode)
+		{
+			Warn("[LotLuaApi] " + api + ": needs a running player session (enter Test or Game mode first)");
+			return null;
+		}
+		LotObject part = AsPart(handle, api);
+		if (part == null) return null;
+		RigidBody3D body = part.CollisionBody as RigidBody3D;
+		if (body == null || !GodotObject.IsInstanceValid(body))
+		{
+			Warn("[LotLuaApi] " + api + ": handle " + handle +
+				" is not simulated (only unanchored parts simulate in a session)");
+			return null;
+		}
+		return body;
+	}
+
+	/// <summary>A simulated part's linear velocity, or zero with a warning — see
+	/// <see cref="AsSimulatedBody"/> for the refusal rules.</summary>
+	private Vector3 SimulatedVelocity(int handle, string api)
+	{
+		RigidBody3D body = AsSimulatedBody(handle, api);
+		return body != null ? body.LinearVelocity : Vector3.Zero;
+	}
+
+	/// <summary>Sets the part's surface friction, clamped at 0 (higher = grippier; 1 is Godot's
+	/// default). Lot state, not a session action: it persists with the lot and reaches the live
+	/// body immediately, in build mode and play alike. False for a missing handle (values are
+	/// clamped, never refused).</summary>
+	public bool SetFriction(int handle, float value)
+	{
+		LotObject part = AsPart(handle, "SetFriction");
+		if (part == null) return false;
+		part.SetFriction(value);
+		return true;
+	}
+
+	/// <summary>The part's friction, or 0 for a missing handle. See <see cref="SetFriction"/>.</summary>
+	public float GetFriction(int handle)
+	{
+		LotObject part = AsPart(handle, "GetFriction");
+		return part != null ? part.Friction : 0f;
+	}
+
+	/// <summary>Sets the bounciness, clamped into 0..1. Everything else matches
+	/// <see cref="SetFriction"/>.</summary>
+	public bool SetBounce(int handle, float value)
+	{
+		LotObject part = AsPart(handle, "SetBounce");
+		if (part == null) return false;
+		part.SetBounce(value);
+		return true;
+	}
+
+	/// <summary>The part's bounciness, or 0 for a missing handle.</summary>
+	public float GetBounce(int handle)
+	{
+		LotObject part = AsPart(handle, "GetBounce");
+		return part != null ? part.Bounce : 0f;
+	}
+
+	/// <summary>
+	/// Sets the part's mass. 0 means "auto" — derived from the part's size, the rule every part
+	/// followed before this property existed; a positive value overrides it (floored at
+	/// LotObject.MinExplicitMass). Impulses divide by it, so this is the weight knob. False for a
+	/// missing handle.
+	/// </summary>
+	public bool SetMass(int handle, float value)
+	{
+		LotObject part = AsPart(handle, "SetMass");
+		if (part == null) return false;
+		part.SetMass(value);
+		return true;
+	}
+
+	/// <summary>The part's explicit mass, or 0 for "auto" and for a missing handle. What a body
+	/// actually weighs is <see cref="LotObject.MassForBody"/>.</summary>
+	public float GetMass(int handle)
+	{
+		LotObject part = AsPart(handle, "GetMass");
+		return part != null ? part.Mass : 0f;
+	}
+
+	// --- surface (milestone 2.9) -----------------------------------------------------------------
+	//
+	// Transparency and luminescence are lot state, exactly like friction: they persist with the
+	// lot and apply in build mode and play alike. They are declared in LotPropertyRegistry
+	// ("transparency", "luminescence"), so the Inspector edits the same fields these verbs write
+	// and editor and script can never disagree. A decal is refused by the part setters themselves
+	// (a panel has its own Opacity; it is imagery, not a light source), so aiming these verbs at a
+	// decal returns true and changes nothing — the same signature-safety rule SetAnchored follows.
+
+	/// <summary>Sets how solid the part looks: 0 fully opaque (the default), 1 invisible. Values
+	/// are clamped into 0..1, never refused. An invisible part stays selectable/draggable and its
+	/// collision is unchanged — use <see cref="SetCanCollide"/> for passing through. False for a
+	/// missing handle.</summary>
+	public bool SetTransparency(int handle, float value)
+	{
+		LotObject part = AsPart(handle, "SetTransparency");
+		if (part == null) return false;
+		part.SetTransparency(value);
+		return true;
+	}
+
+	/// <summary>The part's transparency, or 0 for a missing handle. See <see cref="SetTransparency"/>.</summary>
+	public float GetTransparency(int handle)
+	{
+		LotObject part = AsPart(handle, "GetTransparency");
+		return part != null ? part.Transparency : 0f;
+	}
+
+	/// <summary>Sets how much the part glows: 0 (the default) is a normal lit part; above 0 it
+	/// emits its own colour and lights its surroundings while it is among the nearest glowing
+	/// parts to the camera (the pool is bounded — see docs/material-api.md). Clamped at 0, never
+	/// refused. False for a missing handle.</summary>
+	public bool SetLuminescence(int handle, float value)
+	{
+		LotObject part = AsPart(handle, "SetLuminescence");
+		if (part == null) return false;
+		part.SetLuminescence(value);
+		return true;
+	}
+
+	/// <summary>The part's luminescence, or 0 for a missing handle. See <see cref="SetLuminescence"/>.</summary>
+	public float GetLuminescence(int handle)
+	{
+		LotObject part = AsPart(handle, "GetLuminescence");
+		return part != null ? part.Luminescence : 0f;
+	}
+
+	// --- internals ---
+
+	private int Spawn3D(LotObjectKind kind, Vector3 at)
+	{
+		if (_scene == null) return -1;
+		LotObject obj = _scene.SpawnPrimitive(kind, at);
+		int handle = _scene.RegisterHandle(obj);
+		TagLoadTimeSpawn(obj);
+		return handle;
+	}
+
+	/// <summary>
+	/// Marks a node spawned while a script's initial load was running as owned by that script (F2):
+	/// the reload cleanup deletes owned nodes before re-running the script, which is what stops a
+	/// "spawn the capsule in the root script" pattern from duplicating them. Handler-time spawns are
+	/// deliberately left untagged (they are runtime state).
+	/// </summary>
+	private void TagLoadTimeSpawn(Node node)
+	{
+		LuaNetBridge net = Net;
+		if (net == null || node == null) return;
+		if (net.LoadOwnerHandle < 0) return;
+		node.SetMeta(LoadSpawnOwnerMeta, net.LoadOwnerHandle);
+		node.SetMeta(LoadSpawnOwnerScriptMeta, net.LoadOwnerScript ?? "");
+	}
+
+	/// <summary>Meta marking a load-time spawn's owner (entity handle).</summary>
+	public const string LoadSpawnOwnerMeta = "openlot_spawn_owner";
+
+	/// <summary>Meta recording which script's load spawned the node.</summary>
+	public const string LoadSpawnOwnerScriptMeta = "openlot_spawn_owner_script";
+
+	private int SpawnUiInternal(LotUIKind kind, Vector2 pos, Vector2 size, string label)
+	{
+		if (_scene == null) return -1;
+		// Same frame constraint as the editor: spawned UI always lands inside the picture frame.
+		UiGizmoMath.ClampRect(ref pos, ref size, _scene.UiCanvasBounds);
+		LotUIElement el = _scene.SpawnUIElement(kind, pos, size, label);
+		int handle = _scene.RegisterHandle(el);
+		TagLoadTimeSpawn(el);
+		return handle;
+	}
+
+	private Node Resolve(int handle, string api)
+	{
+		Node node = _scene != null ? _scene.GetByHandle(handle) : null;
+		if (node == null) Warn("[LotLuaApi] " + api + ": no lot object for handle " + handle);
+		return node;
+	}
+
+	private Node3D AsNode3D(int handle, string api)
+	{
+		return Resolve(handle, api) as Node3D;
+	}
+
+	/// <summary>Resolves a handle to a 3D part, or null with a warning when it is not one.</summary>
+	// --- spatial queries (milestone 3.13) -------------------------------------------------------
+	//
+	// Sphere/box overlap and a swept sphere, session-gated like the raycast (there is no live world
+	// to query outside one) and returned as ONE table per call — one boundary crossing, never one
+	// per hit. Caps, dedupe, ordering and the mask live in SpatialQuery, so the future editor-side
+	// query volume runs the identical query; the explosion helper is built on the same primitive.
+
+	/// <summary>Scratch globals NLua's NewTable/GetTable pairing needs (per call, never reused as
+	/// a result: rebound each time, so results never alias).</summary>
+	private const string QueryScratchTable = "__openlot_query_hits";
+	private const string QueryHitScratchTable = "__openlot_query_hit";
+
+	private bool QueryUnavailable(string api)
+	{
+		if (_scene == null || !_scene.InTestMode)
+		{
+			Warn("[LotLuaApi] " + api + ": needs a running player session (enter Test or Game mode first)");
+			return true;
+		}
+		if (Lua == null)
+		{
+			Warn("[LotLuaApi] " + api + ": the script runtime is not ready");
+			return true;
+		}
+		return false;
+	}
+
+	/// <summary>Every entity whose collider overlaps the sphere, as an array of
+	/// {handle, x, y, z}, or nil outside a session / on bad input. Ordered by handle, capped at 64
+	/// (see SpatialQuery). The mask is the editor pick mask: non-collidable parts are visible too.</summary>
+	public object QuerySphere(float x, float y, float z, float radius)
+	{
+		if (QueryUnavailable("QuerySphere")) return null;
+		if (radius <= 0f)
+		{
+			Warn("[LotLuaApi] QuerySphere: the radius must be positive");
+			return null;
+		}
+		System.Collections.Generic.List<SpatialQuery.Hit> hits = new System.Collections.Generic.List<SpatialQuery.Hit>();
+		if (!SpatialQuery.OverlapSphere(_scene, new Vector3(x, y, z), radius, hits, out bool truncated))
+		{
+			Warn("[LotLuaApi] QuerySphere: there is no live physics world to query");
+			return null;
+		}
+		if (truncated) Warn("[LotLuaApi] QuerySphere: more than " + SpatialQuery.MaxHits + " results; the list is capped");
+		return HitsToLua(hits);
+	}
+
+	/// <summary>Every entity overlapping the box centred at (x,y,z) with size (sx,sy,sz) — the same
+	/// contract as <see cref="QuerySphere"/>.</summary>
+	public object QueryBox(float x, float y, float z, float sx, float sy, float sz)
+	{
+		if (QueryUnavailable("QueryBox")) return null;
+		if (sx <= 0f || sy <= 0f || sz <= 0f)
+		{
+			Warn("[LotLuaApi] QueryBox: the size must be positive on every axis");
+			return null;
+		}
+		System.Collections.Generic.List<SpatialQuery.Hit> hits = new System.Collections.Generic.List<SpatialQuery.Hit>();
+		if (!SpatialQuery.OverlapBox(_scene, new Vector3(x, y, z), new Vector3(sx, sy, sz), hits, out bool truncated))
+		{
+			Warn("[LotLuaApi] QueryBox: there is no live physics world to query");
+			return null;
+		}
+		if (truncated) Warn("[LotLuaApi] QueryBox: more than " + SpatialQuery.MaxHits + " results; the list is capped");
+		return HitsToLua(hits);
+	}
+
+	/// <summary>A sphere swept from (x,y,z) along (dx,dy,dz) for maxDistance — the melee "what did
+	/// I swing through" query. Same result contract as <see cref="QuerySphere"/>; the direction is
+	/// normalized here, so the distance is always metres.</summary>
+	public object SweepSphere(float x, float y, float z, float dx, float dy, float dz, float radius, float maxDistance)
+	{
+		if (QueryUnavailable("SweepSphere")) return null;
+		if (radius <= 0f)
+		{
+			Warn("[LotLuaApi] SweepSphere: the radius must be positive");
+			return null;
+		}
+		if (maxDistance <= 0f)
+		{
+			Warn("[LotLuaApi] SweepSphere: maxDistance must be positive");
+			return null;
+		}
+		Vector3 direction = new Vector3(dx, dy, dz);
+		if (direction.LengthSquared() < 1e-8f)
+		{
+			Warn("[LotLuaApi] SweepSphere: the direction is zero; give a direction to sweep along");
+			return null;
+		}
+		System.Collections.Generic.List<SpatialQuery.Hit> hits = new System.Collections.Generic.List<SpatialQuery.Hit>();
+		if (!SpatialQuery.SweepSphere(_scene, new Vector3(x, y, z), direction, radius, maxDistance, hits, out bool truncated))
+		{
+			Warn("[LotLuaApi] SweepSphere: there is no live physics world to query");
+			return null;
+		}
+		if (truncated) Warn("[LotLuaApi] SweepSphere: more than " + SpatialQuery.MaxHits + " results; the list is capped");
+		return HitsToLua(hits);
+	}
+
+	/// <summary>Pushes every simulated body within radius of (x,y,z) with a falloff-scaled radial
+	/// impulse and returns how many were pushed (static parts are skipped — nowhere to carry it).
+	/// Authority (§1.3): physics is client-local; an explosion others must agree on belongs in a
+	/// net.server handler.</summary>
+	public int Explode(float x, float y, float z, float radius, float power)
+	{
+		if (QueryUnavailable("Explode")) return 0;
+		if (radius <= 0f || power <= 0f)
+		{
+			Warn("[LotLuaApi] Explode: radius and power must be positive");
+			return 0;
+		}
+		return SpatialQuery.Explode(_scene, new Vector3(x, y, z), radius, power);
+	}
+
+	/// <summary>Builds the per-call Lua array: one fresh table per hit (a scratch global rebound
+	/// per iteration — earlier hits stay referenced by the array, never aliased), 1-based indices.</summary>
+	private object HitsToLua(System.Collections.Generic.List<SpatialQuery.Hit> hits)
+	{
+		Lua.NewTable(QueryScratchTable);
+		NLua.LuaTable array = Lua.GetTable(QueryScratchTable);
+		for (int i = 0; i < hits.Count; i++)
+		{
+			Lua.NewTable(QueryHitScratchTable);
+			NLua.LuaTable hit = Lua.GetTable(QueryHitScratchTable);
+			hit["handle"] = hits[i].Handle;
+			hit["x"] = hits[i].Position.X;
+			hit["y"] = hits[i].Position.Y;
+			hit["z"] = hits[i].Position.Z;
+			array[i + 1] = hit;
+		}
+		return array;
+	}
+
+	// --- player data (milestone 3.12) -----------------------------------------------------------
+	//
+	// Values are keyed by the stable player identity (§3.12a Account IDs, or a device's guest id),
+	// never by peer ids or display names — both are session/presentation values. There is no wire
+	// yet: every call executes on the local store, which is the authority in v1 (design doc D6);
+	// §10.1 routes client calls to the host and §10.10 moves declared-protected domains to the data
+	// subserver, both without changing this vocabulary.
+
+	/// <summary>This device's player id (22 characters): the stored account's Account ID, or a
+	/// machine-local guest id. The value to key player data with for the local player.</summary>
+	public string GetLocalPlayer()
+	{
+		if (_scene == null) return "";
+		return _scene.LocalPlayerId;
+	}
+
+	/// <summary>The stored value for (player, key): a number, a string or a boolean; nil when the
+	/// key was never set. The player must be a 22-character id — Lot.GetLocalPlayer() for this
+	/// device; peer ids from event handlers are session-scoped and are refused until §10.1 maps
+	/// them to accounts (design doc D1).</summary>
+	public object GetPlayerValue(object player, string key)
+	{
+		if (_scene == null)
+		{
+			Warn("[LotLuaApi] GetPlayerValue: the scene is not ready");
+			return null;
+		}
+		if (!TryResolvePlayerArg(player, "GetPlayerValue", out string playerId)) return null;
+		if (!_scene.PlayerData.TryGet(playerId, key, out PlayerDataValue value))
+		{
+			// A missing key is a normal nil; only a malformed key deserves a warning.
+			if (string.IsNullOrEmpty(key) || key.Length > PlayerDataStore.MaxKeyLength)
+				Warn("[LotLuaApi] GetPlayerValue: the key must be 1.." + PlayerDataStore.MaxKeyLength + " characters");
+			return null;
+		}
+		return ValueToLua(value);
+	}
+
+	/// <summary>Stores a value for (player, key). Values are numbers, strings or booleans; the caps
+	/// and the total budget refuse readably (design doc D3). Returns true when stored.</summary>
+	public bool SetPlayerValue(object player, string key, object value)
+	{
+		if (_scene == null)
+		{
+			Warn("[LotLuaApi] SetPlayerValue: the scene is not ready");
+			return false;
+		}
+		if (!TryResolvePlayerArg(player, "SetPlayerValue", out string playerId)) return false;
+		if (!TryCoercePlayerValue(value, "SetPlayerValue", out PlayerDataValue stored)) return false;
+		if (!_scene.PlayerData.Set(playerId, key, stored, out string error))
+		{
+			Warn("[LotLuaApi] SetPlayerValue: " + error);
+			return false;
+		}
+		return true;
+	}
+
+	/// <summary>Removes one stored value. False when nothing was stored there.</summary>
+	public bool RemovePlayerValue(object player, string key)
+	{
+		if (_scene == null)
+		{
+			Warn("[LotLuaApi] RemovePlayerValue: the scene is not ready");
+			return false;
+		}
+		if (!TryResolvePlayerArg(player, "RemovePlayerValue", out string playerId)) return false;
+		return _scene.PlayerData.Remove(playerId, key);
+	}
+
+	/// <summary>Resolves the script-facing player argument to a stored player id (design doc D1):
+	/// a 22-character id string passes; a number gets the §10.1 pointer, because keying on a peer
+	/// id would make the data session-scoped.</summary>
+	private bool TryResolvePlayerArg(object player, string verb, out string playerId)
+	{
+		playerId = "";
+		if (player is string id)
+		{
+			if (PlayerDataStore.LooksLikePlayerId(id)) { playerId = id; return true; }
+			Warn("[LotLuaApi] " + verb + ": '" + id + "' is not a 22-character player id; Lot.GetLocalPlayer() gives this device's");
+			return false;
+		}
+		if (player is double || player is float || player is long || player is int)
+		{
+			Warn("[LotLuaApi] " + verb + ": peer ids are session-scoped and are not player-data keys; the peer-to-account map arrives with networking (§10.1) - use Lot.GetLocalPlayer()");
+			return false;
+		}
+		Warn("[LotLuaApi] " + verb + ": the player must be an id string from Lot.GetLocalPlayer()");
+		return false;
+	}
+
+	/// <summary>Turns a Lua-side value into a stored one, or warns and refuses. Numbers, strings and
+	/// booleans only; NaN/infinity are refused by the store (set returns its message through the
+	/// normal failure path).</summary>
+	private bool TryCoercePlayerValue(object value, string verb, out PlayerDataValue stored)
+	{
+		stored = default(PlayerDataValue);
+		if (value is double d) { stored = PlayerDataValue.OfNumber(d); return true; }
+		if (value is float f) { stored = PlayerDataValue.OfNumber(f); return true; }
+		if (value is long l) { stored = PlayerDataValue.OfNumber(l); return true; }
+		if (value is int i) { stored = PlayerDataValue.OfNumber(i); return true; }
+		if (value is bool b) { stored = PlayerDataValue.OfBoolean(b); return true; }
+		if (value is string s) { stored = PlayerDataValue.OfString(s); return true; }
+		Warn("[LotLuaApi] " + verb + ": values are numbers, strings or booleans" +
+			(value == null ? " (a nil value clears nothing - use Lot.RemovePlayerValue)" : ""));
+		return false;
+	}
+
+	private static object ValueToLua(PlayerDataValue value)
+	{
+		switch (value.Kind)
+		{
+			case PlayerDataValue.ValueKind.Number: return value.Number;
+			case PlayerDataValue.ValueKind.String: return value.Text ?? "";
+			default: return value.Flag;
+		}
+	}
+
+	private LotObject AsPart(int handle, string api)
+	{
+		Node node = Resolve(handle, api);
+		if (node == null) return null;
+		LotObject part = node as LotObject;
+		if (part == null) Warn("[LotLuaApi] " + api + ": handle " + handle + " is not a 3D part");
+		return part;
+	}
+
+	/// <summary>Resolves a handle to a decal, or null with a warning when it is not one — so a script
+	/// pointing a decal verb at a part is told why nothing happened.</summary>
+	private LotObject AsDecal(int handle, string api)
+	{
+		Node node = Resolve(handle, api);
+		if (node == null) return null;
+		LotObject lot = node as LotObject;
+		if (lot == null || lot.Kind != LotObjectKind.Decal)
+		{
+			Warn("[LotLuaApi] " + api + ": handle " + handle + " is not a decal");
+			return null;
+		}
+		return lot;
+	}
+
+	private LotUIElement AsUiElement(int handle, string api)
+	{
+		return Resolve(handle, api) as LotUIElement;
+	}
+
+	/// <summary>
+	/// Reports a creator-facing misuse to the Output window and the engine console in one step.
+	/// Every warning in this file goes through here, so the window sees them without a second call
+	/// site per message; the engine line stays for headless runs.
+	/// </summary>
+	private static void Warn(string message)
+	{
+		LotLog.Warn("lua", message);
+		GD.PushWarning(message);
+	}
+
+	private void WarnMissing(int handle, string api)
+	{
+		Warn("[LotLuaApi] " + api + ": no lot object for handle " + handle);
+	}
+}

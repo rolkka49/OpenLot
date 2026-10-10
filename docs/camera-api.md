@@ -1,9 +1,9 @@
 # OpenLot scripting — camera control
 
 **Audience:** creators writing lot scripts in Lua.
-**Status:** implemented (Milestone 3.10). Camera modes work inside a player session (Test/Game
-mode); outside one every call refuses politely — the camera belongs to the session, and no camera
-state ever lands in the saved lot.
+**Status:** implemented (Milestone 3.10; player zoom added by Milestone 3.14). Camera modes work
+inside a player session (Test/Game mode); outside one every call refuses politely — the camera
+belongs to the session, and no camera state ever lands in the saved lot.
 
 ---
 
@@ -54,3 +54,21 @@ shot()   -- cancel: the camera freezes exactly where it is (that pose becomes "f
   not what the character does.
 * The camera's FOV, mouse sensitivity and invert-Y options are the client settings milestone's
   territory (they apply to all modes at once, since every mode shares the same camera and look).
+
+## 4. Player zoom (the wheel)
+
+The player's own camera control (milestone 3.14) — it is **input, not script API**, so no verb
+changes: scripts leave it alone, and it never enters the save.
+
+* **Wheel up** pulls the orbit in, **wheel down** pushes it out (clamped to the configured range).
+  The motion is damped — a single notch is a step, a held spin is a glide.
+* Zoom all the way in and the view **blends into first person**: the camera slides from the orbit
+  pose to the character's eye while the character's own mesh fades out — no mode change and no
+  snap, and zooming back out lands on exactly the orbit it left.
+* **Fixed and scripted cameras ignore the wheel** — a cutscene cannot be zoomed.
+* If a script sets `firstperson`, the wheel out is how the player takes the view back: the first
+  outward notch returns to the orbit at the band's edge. Scripts that care can watch
+  `Lot.GetCameraMode()` — a script-set first person reads as `"firstperson"` until the player
+  wheels out, then `"thirdperson"`.
+* Zoom is session-only: entering a session starts at the default distance, leaving resets it, and
+  a modal dialog denies zoom exactly as it denies look.

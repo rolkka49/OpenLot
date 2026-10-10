@@ -19,7 +19,7 @@ t1()  -- every call above returns a cancel token, the same shape Subscribe retur
 
 | # | Decision | Where it lives |
 |---|---|---|
-| D1 | **One scheduler, one clock.** `LotScheduler` holds every running tween and timer on a single accumulated-delta clock (simulation time — not wall time), so behaviour is deterministic and pauses exactly with the session. It is the "one scheduler, not two" §3.7 promised: same tick point, same one-watchdog-unit-per-callback policy, same 3-trip breaker. | `builder/LotScheduler.cs`, `ScriptRuntime.Tick` |
+| D1 | **One scheduler, one clock.** `LotScheduler` holds every running tween and timer on a single accumulated-delta clock (simulation time — not wall time), so behaviour is deterministic and pauses exactly with the session. It is the "one scheduler, not two" §3.7 promised: same tick point, same one-watchdog-unit-per-callback policy, same 3-trip breaker. | `builder/lot/LotScheduler.cs`, `ScriptRuntime.Tick` |
 | D2 | **Lua never runs per frame.** A tween's interpolation and node writes are pure C#; a timer callback runs as one armed watchdog unit through `LuaNetBridge.CallTimer`. An animating lot therefore costs the Lua VM nothing. | `LotScheduler.Advance`, `LuaNetBridge.CallTimer` |
 | D3 | **Tween verbs**: `TweenPosition` / `TweenRotation` / `TweenScale` / `TweenColor` / `TweenUIRect`, each `(handle, values..., duration, easing?)`. `TweenColor` and `TweenUIRect` also work on `LotUIElement`s; transform tweens take any `Node3D`. Invalid target kind or unknown easing raises in the calling script (same as `Subscribe`'s validation). | `LuaBootstrap` Lot overrides, `LotLuaApi` plumbing |
 | D4 | **Input is one packed plumbing call.** The five sugar verbs funnel into one bound `ScheduleTween(handle, kind, a, b, c, d, duration, easing)`; the four floats are the value (color alpha included; transforms leave d unused). Kept out of the `Lot` table like `NetInvoke`. | `LotLuaApi`, `LuaManager` exclusion list |
@@ -38,7 +38,10 @@ t1()  -- every call above returns a cancel token, the same shape Subscribe retur
    write their nodes; due timers fire through `CallTimer`, one unit each) → `onFrame` per entity →
    `Router.Flush()` → after-frame hook.
 2. `Advance` reads and writes live nodes; a target that stopped resolving (freed) removes its entry
-   silently — no stale references survive (memory-review discipline).
+   silently — no stale references survive (memory-review discipline). The walk runs over a reused
+   snapshot and re-locates entries by id (the post-3.11 follow-up fix): a timer callback may cancel
+   entries — its own or a sibling's — while the loop is firing them, which the old index-based
+   write-back did not survive.
 3. Completion removes the entry; tokens remain valid no-ops afterwards.
 
 ## 4. Lifecycle

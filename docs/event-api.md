@@ -1,10 +1,11 @@
 # OpenLot scripting — events and `onFrame`
 
 **Audience:** creators writing lot scripts in Lua.
-**Status:** implemented for the physics-side half (Milestone 3.7). `touched` / `touchEnded` and
-`onFrame` work in Test/Game sessions today. `clicked`, `entered` / `exited`, `destroyed` and
-`playerJoined` / `playerLeft` are **accepted** by `Subscribe` (the names are API from now on) but
-do **not fire yet** — subscribing to them is harmless; §6 says what each is waiting on.
+**Status:** implemented for the physics-side half (Milestone 3.7). `touched` / `touchEnded`,
+`entered` / `exited` (raised by query volumes, milestone 3.13) and `onFrame` work in Test/Game
+sessions today. `clicked`, `destroyed` and `playerJoined` / `playerLeft` are **accepted** by
+`Subscribe` (the names are API from now on) but do **not fire yet** — subscribing to them is
+harmless; §7 says what each is waiting on.
 
 ---
 
@@ -58,7 +59,36 @@ end)
 A touch caused by the player enters the same attribution scope `net.*` uses, so the handler's own
 `net.server` calls are counted as player-originated too.
 
-## 3. `onFrame`
+## 3. `entered` / `exited` (query volumes)
+
+```lua
+-- On a query volume's script (Toolbox -> Gameplay -> Query Volume):
+Subscribe(this.Handle, "entered", function(other, player)
+    -- other  = the handle of the entity that entered the region
+    -- player = the local peer id when it was the player's own character, nil otherwise
+    Lot.Log("entered " .. tostring(other))
+end)
+
+Subscribe(this.Handle, "exited", function(other)
+    -- fires when that entity leaves the region
+end)
+```
+
+* **Sessions only**, exactly like `touched`: the region evaluates once per frame while Test/Game
+  mode runs, and the build-mode preview hides for the session.
+* **What counts as entering:** any entity the region's shape touches — the character's capsule,
+  spawned objects, other volumes; never the region itself and never implementation nodes. An
+  editor-placed object carries an identity once it has a script (the handle rule), and a volume
+  always gets one at session start — placing it is enough.
+* **The baseline is "empty".** When a session starts, everything already inside the region fires
+  `entered` on the first evaluation, so "everything in the region has entered" always holds.
+* **Edge-triggered.** A part sitting inside fires once; `exited` fires when it leaves.
+* **The player counts**, with the same attribution as `touched`: `entered` with `player` set and
+  `net.fromPlayer` true when the player's own character walked in.
+* The region's **Shape** and **Radius** are Inspector rows; a box volume is sized by its **Size**
+  row and samples its rotated shape. See `docs/query-api.md` §4.
+
+## 4. `onFrame`
 
 ```lua
 local elapsed = 0
@@ -74,7 +104,7 @@ end
   the same collision rule `net.*` declarations use.
 * Every frame is one watchdog unit for that entity, so a runaway `onFrame` trips alone.
 
-## 4. Lifetime and cleanup
+## 5. Lifetime and cleanup
 
 * **Cancel tokens.** `Subscribe` returns a function; call it to remove that subscription:
   `local token = Subscribe(...)` … `token()`.
@@ -89,7 +119,7 @@ end
 * **Subscriptions live in your script**, so they travel inside the `.lot` file like the rest of
   it. Nothing extra to save.
 
-## 5. Deliberate behaviour worth knowing
+## 6. Deliberate behaviour worth knowing
 
 * One sensor per subscribed subject; overlaps are **bodies only** (a sensor never sees another
   sensor), and internal implementation nodes (collision hulls, decals, joints) are never reported
@@ -102,13 +132,11 @@ end
 * A sensor follows the part it belongs to; on a simulated (falling) part it tracks the visual, so
   it is a physics step behind the body.
 
-## 6. Reserved names (accepted today, not firing yet)
+## 7. Reserved names (accepted today, not firing yet)
 
 | Name | Waiting on |
 |---|---|
 | `clicked` | the shared in-session input path (§5.2 / §5.3); it will carry the originating player |
-| `entered` / `exited` | §3.13's query volumes, which will raise them through this same registry |
 | `destroyed` | a re-entrancy-safe dispatch point (a follow-up) |
-| `playerJoined` / `playerLeft` | §8.1's real transport (no peers exist offline) |
-| timer callbacks | §3.8 — the timer verbs will ride this same event spine |
+| `playerJoined` / `playerLeft` | §10.1's real transport (no peers exist offline) |
 

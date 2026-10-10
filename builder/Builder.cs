@@ -57,6 +57,12 @@ public partial class Builder : Node
 	private EnvironmentControls _environment;
 	private CollisionGroupControls _collisionGroups;
 
+	// Toggleable editor windows (post-3.11 friction review): the Add Window menu and the layout
+	// pass iterate this list instead of hardcoding each window, so a new window — core or plugin
+	// (§13.2) — is one AddEditorWindow call. The concrete fields above stay for typed call sites
+	// (focus flags, Open/ApplyCode, close-on-exit).
+	private readonly System.Collections.Generic.List<IEditorWindow> _editorWindows = new System.Collections.Generic.List<IEditorWindow>();
+
 	// Modal state. _pauseOpen/_confirmOpen are sampled inside the layout pass (ImGui popup
 	// state is only valid there); the request flags are fed from _UnhandledInput.
 	private bool _pauseRequested = false;
@@ -140,6 +146,17 @@ public partial class Builder : Node
 	/// The OS window's close button (and any other window-close request), routed through the same prompt
 	/// as the menu's exit.
 	/// </summary>
+	/// <summary>Registers a toggleable editor window: it joins the Add Window menu and the
+	/// layout pass in registration order. The seam creation-environment plugins will use later
+	/// (§13.2) — see <see cref="IEditorWindow"/>.</summary>
+	public void AddEditorWindow(IEditorWindow window)
+	{
+		if (window != null) _editorWindows.Add(window);
+	}
+
+	/// <summary>Registered editor windows, in draw order (tests / diagnostics).</summary>
+	public System.Collections.Generic.IReadOnlyList<IEditorWindow> EditorWindows { get { return _editorWindows; } }
+
 	public override void _Ready()
 	{
 		Instance = this;
@@ -174,6 +191,11 @@ public partial class Builder : Node
 		_commandLine = new BuilderCommandLine(this);
 		_environment = new EnvironmentControls();
 		_collisionGroups = new CollisionGroupControls();
+
+		// Add Window is registry-driven: register the core windows in the order the menu and the
+		// draw pass used to hardcode them.
+		AddEditorWindow(_codeEditor);
+		AddEditorWindow(_output);
 
 		// Crash recovery (milestone 4.1). The question is read BEFORE the marker is written, so the
 		// marker this call creates cannot be mistaken for a crash; then it is re-armed for this session
@@ -370,7 +392,7 @@ public partial class Builder : Node
 	public void ExitToTerminal()
 	{
 		HasUnsavedChanges = false;
-		GetTree().ChangeSceneToFile("res://terminal.tscn");
+		GetTree().ChangeSceneToFile("res://client/terminal.tscn");
 	}
 
 	/// <summary>
@@ -450,8 +472,10 @@ public partial class Builder : Node
 		_toolbox.Draw(this);
 		_inspector.Draw(this);
 		_commandLine.Draw(this);
-		if (_codeEditor.IsOpen) _codeEditor.Draw(this);
-		if (_output.IsOpen) _output.Draw(this);
+		for (int i = 0; i < _editorWindows.Count; i++)
+		{
+			if (_editorWindows[i].IsOpen) _editorWindows[i].Draw(this);
+		}
 
 		if (_openConfirm)
 		{
@@ -522,12 +546,13 @@ public partial class Builder : Node
 		}
 		if (ImGui.BeginMenu("Add Window"))
 		{
-			if (ImGui.MenuItem("Code Editor"))
-				_codeEditor.Show();
-			// The Output panel (milestone 2.8): build-mode diagnostics that stay readable instead
-			// of flashing for four seconds or reaching only Godot's console.
-			if (ImGui.MenuItem("Output"))
-				_output.Show();
+			// Registry-driven (post-3.11 friction review): every IEditorWindow appears here. The
+			// Code Editor and the Output panel (milestone 2.8) are the core registrations.
+			for (int i = 0; i < _editorWindows.Count; i++)
+			{
+				if (ImGui.MenuItem(_editorWindows[i].Title))
+					_editorWindows[i].Show();
+			}
 			ImGui.EndMenu();
 		}
 		if (ImGui.BeginMenu("View"))
@@ -566,7 +591,7 @@ public partial class Builder : Node
 		if (ImGui.BeginMenu("Game"))
 		{
 			// Game mode (§3.4): the same player session with the creation-environment UI hidden — what
-			// a player sees. Entered from the builder until lot persistence (§8) lands.
+			// a player sees. Entered from the builder; the lot itself persists through §4.
 			if (ImGui.MenuItem(InGameMode ? "Stop Game Mode" : "Play in Game Mode"))
 			{
 				if (InTestMode) ExitTestMode();

@@ -158,7 +158,7 @@ public sealed class EditorHistory
 		return true;
 	}
 
-	/// <summary>Records the current cursor position as "saved" (milestone 8.2 will call this for real).</summary>
+	/// <summary>Records the current cursor position as "saved" — called from the save/load pipeline (§4.2).</summary>
 	public void MarkSavePoint()
 	{
 		_savePoint = _cursor;
@@ -243,28 +243,49 @@ public sealed class TransformCommand : IEditorCommand
 	private readonly Node3D _node;
 	private readonly Transform3D _before;
 	private readonly Transform3D _after;
+	// Size migration: a resize is a transform AND an authored-size change, so one entry carries
+	// both. _sized is null for a plain transform entry (and for every node without a size).
+	private readonly LotObject _sized;
+	private readonly Vector3 _sizeBefore;
+	private readonly Vector3 _sizeAfter;
 	public string Label { get; private set; }
 
 	public TransformCommand(string label, Node3D node, Transform3D before, Transform3D after)
+		: this(label, node, before, after, null, Vector3.One, Vector3.One)
+	{
+	}
+
+	public TransformCommand(string label, Node3D node, Transform3D before, Transform3D after,
+		LotObject sized, Vector3 sizeBefore, Vector3 sizeAfter)
 	{
 		Label = string.IsNullOrEmpty(label) ? "Transform" : label;
 		_node = node;
 		_before = before;
 		_after = after;
+		_sized = sized;
+		_sizeBefore = sizeBefore;
+		_sizeAfter = sizeAfter;
 	}
 
-	public void Redo(Builder builder) { Apply(_after); }
-	public void Undo(Builder builder) { Apply(_before); }
+	public void Redo(Builder builder) { Apply(_after, _sizeAfter); }
+	public void Undo(Builder builder) { Apply(_before, _sizeBefore); }
 	public void Discard(Builder builder) { }
 
-	private void Apply(Transform3D transform)
+	private void Apply(Transform3D transform, Vector3 size)
 	{
 		if (!EditTreeOps.IsLive(_node)) return;
 		_node.Transform = transform;
+		if (_sized != null && EditTreeOps.IsLive(_sized)) _sized.SetSize(size);
 	}
 
 	/// <summary>True when two transforms differ enough to be worth a history entry.</summary>
 	public static bool Changed(Transform3D a, Transform3D b)
+	{
+		return !a.IsEqualApprox(b);
+	}
+
+	/// <summary>True when two authored sizes differ enough to be worth a history entry.</summary>
+	public static bool SizeChanged(Vector3 a, Vector3 b)
 	{
 		return !a.IsEqualApprox(b);
 	}

@@ -1,6 +1,6 @@
-[gd_scene format=3 uid="uid://j1jn4gspif80"]
+[gd_scene format=3 uid="uid://dkubar4ha076l"]
 
-[ext_resource type="Script" uid="uid://dgwaa5pl1gd2j" path="res://Terminal.cs" id="1_sxuvd"]
+[ext_resource type="Script" path="res://Terminal.cs" id="1_sxuvd"]
 
 [node name="Terminal" type="Node2D" unique_id=1668209505]
 script = ExtResource("1_sxuvd")

@@ -22,7 +22,7 @@ left stick = the four move actions, A = jump, X = interact.
 
 | # | Decision | Where it lives |
 |---|---|---|
-| D1 | **Logical actions on Godot's InputMap.** `LotInputActions` registers the seven action names once (`openlot_moveForward` …) with default events (physical keys + joypad axes/buttons) on first use. Godot's own mapping machinery is the right layer for key mapping — no dependency, no hand-rolled matcher, and §5.5's rebinding UI later has a real store to write to. | `builder/LotInputActions.cs` |
+| D1 | **Logical actions on Godot's InputMap.** `LotInputActions` registers the seven action names once (`openlot_moveForward` …) with default events (physical keys + joypad axes/buttons) on first use. Godot's own mapping machinery is the right layer for key mapping — no dependency, no hand-rolled matcher, and §5.5's rebinding UI later has a real store to write to. | `builder/world/LotInputActions.cs` |
 | D2 | **One poll per frame, reads are cache lookups.** The tick reads every action once per frame plus the accumulated mouse deltas/wheel, and computes held / pressed-this-frame / released-this-frame by comparing against last frame. A script read never touches `Input`, and two scripts in one frame can never see different states. Just-pressed/released are true for exactly one frame. | `LotInputActions.Poll`, `ScriptRuntime.Tick` |
 | D3 | **Session-gated reads** (consistent with §3.7 D1 / §3.8 D8): outside a player session every read answers `false`/`0`, never an error — while you are editing, your keystrokes belong to the editor, not to scripts. Entering/leaving a session resets the snapshot so no stale "pressed" survives the boundary. | `LotInputActions.Reset`, `BuilderScene` |
 | D4 | **Creator API is six reads and nothing else**: `IsActionPressed`, `WasActionPressed`, `WasActionReleased`, `GetActionStrength`, `GetMouseDeltaX/Y`, `GetMouseWheel` — primitives only, unknown action names warn and answer false/0. No new per-frame call path: the reads are what a script asks *about* the cache, not new polling. | `LotLuaApi` |
@@ -52,7 +52,7 @@ left stick = the four move actions, A = jump, X = interact.
 * Script reads are session-gated; the *game's own* controllers are not (they act on their own
   session conditions, exactly as before — the freecam in build mode, the character in a session).
 * Gamepad: this milestone exposes gamepad **state and bindings** (left stick, A, X defaults).
-  Making the player camera/UI fully gamepad-navigable is §14.1's milestone; a gamepad can already
+  Making the player camera/UI fully gamepad-navigable is §16.1's milestone; a gamepad can already
   drive movement and jump through the defaults, which is what the acceptance check exercises.
 
 ## 5. Verification
@@ -76,7 +76,7 @@ left stick = the four move actions, A = jump, X = interact.
 ## 6. Deliberate scope lines
 
 * Persistence of rebinds, the settings UI and conflict detection → §5.5.
-* Touch input → §10; gamepad UI navigation → §14.1; both consume this layer rather than a second
+* Touch input → §12; gamepad UI navigation → §16.1; both consume this layer rather than a second
   input path.
 * The freecam's fly-up stays on Space, which is the `jump` action's default key — one binding
   serves both contexts (editor flight, in-session jump); a rebind of `jump` moves both, which is

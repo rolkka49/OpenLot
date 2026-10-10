@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Openlot"
-run/main_scene="res://terminal.tscn"
+run/main_scene="res://client/terminal.tscn"
 config/features=PackedStringArray("4.7", "C#", "Forward Plus")
 config/icon="res://icon.svg"
 

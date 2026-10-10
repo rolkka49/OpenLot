@@ -67,6 +67,9 @@ public partial class BuilderScene : Node3D
 	private bool _inputSuiteDone;
 	private bool _cameraSuiteDone;
 	private bool _physicsSuiteDone;
+	private bool _playerDataSuiteDone;
+	private bool _spatialSuiteDone;
+	private bool _queryVolumeSuiteDone;
 
 	/// <summary>
 	/// Heavy self-tests (a 20k-encode loop, an 8 MB out-of-memory, a ~10 MB allocation) run only when
@@ -146,6 +149,76 @@ public partial class BuilderScene : Node3D
 	/// </summary>
 	public LotScheduler Scheduler { get; private set; }
 
+	/// <summary>
+	/// The lot's budgeted glow-light pool (milestone 2.9): derived state behind the parts'
+	/// luminescence property — see <see cref="LotGlowLights"/>. Created in <see cref="_Ready"/> with
+	/// the viewport as its light host (replacing a lot must not free the pool; LotRoot is emptied on
+	/// load), updated every frame in every mode, and never serialized.
+	/// </summary>
+	public LotGlowLights GlowLights { get; private set; }
+
+	/// <summary>
+	/// The lot's per-player data store (milestone 3.12): live values keyed by stable player ids,
+	/// written into the archive's `playerdata.json` entry by the one save pipeline and restored by
+	/// <see cref="ReplaceLotFromArchive"/>. Durable but not authored — it is deliberately outside the
+	/// session snapshot, so Test-mode enter/exit never rolls it back (design doc D5).
+	/// </summary>
+	public PlayerDataStore PlayerData { get; private set; }
+
+	/// <summary>
+	/// The session's placed query volumes (milestone 3.13): built on session entry, evaluated once
+	/// per frame, torn down on exit — null outside a session. Each one samples the shared
+	/// <see cref="SpatialQuery"/> and reports enters/leaves through the event registry.
+	/// </summary>
+	public QueryVolumeSession QueryVolumes { get; private set; }
+
+	private string _localPlayerId;
+
+	/// <summary>
+	/// This device's player id (milestone 3.12, design doc D2): the stored account's Account ID when
+	/// one exists, otherwise a machine-local guest id. Resolved lazily and cached per scene —
+	/// registering or importing an account happens in the Terminal scene, so the next lot load picks
+	/// it up; within one builder session the identity cannot change.
+	/// </summary>
+	public string LocalPlayerId
+	{
+		get
+		{
+			if (_localPlayerId == null)
+			{
+				_localPlayerId = AccountStore.TryLoad(AccountStore.DefaultPath, out AccountRecord record, out string _)
+					? record.Key.AccountId
+					: GuestIdentity.GetOrCreate();
+			}
+			return _localPlayerId;
+		}
+	}
+
+	// --- the zoom blend's mesh fade (milestone 3.14) --------------------------------------------
+
+	// The authored transparency the current session's fade started from, captured on entry. The
+	// session snapshot restores the authored value on exit, so whatever the fade left behind never
+	// survives the session — and a blend write never goes through the property service (no undo
+	// entries and no dirty flag for a view effect).
+	private float _sessionCharacterTransparency;
+
+	/// <summary>
+	/// Applies the zoom blend's visual half inside a session: the character's own mesh fades out as
+	/// the wheel brings the view into the first-person band, and back in on the way out. Writes the
+	/// §2.9 transparency material path directly (one material helper, so transparency/luminescence/
+	/// colour cannot disagree); the write is skipped unless it would change anything visible.
+	/// </summary>
+	private void ApplyCharacterFade()
+	{
+		if (PlayerCamera == null || Player == null || Player.Character == null) return;
+		float t = 0f;
+		if (PlayerCamera.Mode == LotCameraMode.ThirdPerson)
+			t = LotCameraMath.Smoothstep(LotCameraMath.BlendFactor(PlayerCamera.Distance, PlayerCamera.BlendStart, PlayerCamera.ZoomMin));
+		float target = Mathf.Lerp(_sessionCharacterTransparency, 1f, t);
+		LotObject character = Player.Character;
+		if (Mathf.Abs(character.Transparency - target) > 0.002f) character.SetTransparency(target);
+	}
+
 	public override void _Ready()
 	{
 		// A fresh session starts from the all-collide default (§3.5); a loaded lot overwrites this
@@ -153,6 +226,13 @@ public partial class BuilderScene : Node3D
 		// was open would leak into a brand-new one.
 		LotCollisionGroups.ResetAllCollisions();
 		BuildViewport();
+		// Milestone 2.9: the glow-light pool is hosted by the viewport, not LotRoot — replacing a
+		// lot frees everything under LotRoot, and the pool must outlive that swap. Its scan root is
+		// the lot container, so candidates are exactly the lot's parts.
+		GlowLights = new LotGlowLights(LotViewport, LotRoot);
+		// Milestone 3.12: the per-player store exists from the first frame, so a script may read and
+		// write player data (and a later load may replace the store) without a null phase.
+		PlayerData = new PlayerDataStore();
 		RegisterLotRootHandle();
 		Api = new LotLuaApi(this);
 		LuaManager.Instance.Initialize(Api);
@@ -203,6 +283,14 @@ public partial class BuilderScene : Node3D
 		// Milestone 2.3 property system: the declaration table, the part properties and their
 		// texture reference lifetimes.
 		LotPropertySelfTest.Run();
+		// The terminal command surface (post-3.11 friction review): parser and registry checks —
+		// pure, no Terminal and no scene.
+		CommandSelfTest.Run();
+		// Milestone 3.12a account identity: the seed-only P-256 rebuild spike, the 50-character
+		// key format with its checksum/version gates, the account id, the challenge/sign/verify
+		// contract (replay rejection), the store round-trip and the session flows on scratch
+		// files, and the no-signing-verb boundary probe. No session, no scene state.
+		AccountSelfTest.Run();
 		// Milestone 3.5 collision groups: the group table, the interaction matrix and how a part's
 		// layer/mask are derived from them.
 		CollisionGroupSelfTest.Run();
@@ -221,6 +309,21 @@ public partial class BuilderScene : Node3D
 		// Milestone 2.8 log sink: the bounded ring, its drop-oldest order, and the print/log
 		// script-output path through the real VM.
 		LotLogSelfTest.Run();
+		// Procedural part meshes with world-unit UVs: the UV orientation contract (verified
+		// against Godot's own primitives), the winding convention, normals/tangents, flat vs
+		// smooth shading, and the resize helper's bounded (shape, size) mesh cache.
+		PartMeshSelfTest.Run();
+		// The size migration: the authored Size on a part (mesh, hull, outline and event-sensor
+		// regeneration), the per-part texture mapping (tiles per unit, per-face stretch), the
+		// wedge kind, the archive record's size field with its old-lot fallback marker, the
+		// size-aware undo entry, the Size tween kind, the two new property declarations and every
+		// new bound Lua verb through the real VM.
+		PartSizeSelfTest.Run();
+		// Milestone 2.9 surface properties: transparency and luminescence (the pre-milestone
+		// material contract at the defaults, the clamps and the colour interplay), the decal
+		// isolation, the archive round trip of both properties, and the budgeted glow-light pool's
+		// selection/follow/cap behaviour — all on detached fixtures, no session.
+		PartMaterialSelfTest.Run(this);
 		// Integration fixture: drives the REAL LuaManager + ScriptRuntime with real script files
 		// (stands in for hands-on testing until milestone 3.4).
 		// The heavy integration suite is deferred to _Process (see IntegrationSuitePhysicsDelay):
@@ -332,11 +435,40 @@ public partial class BuilderScene : Node3D
 		// never leak another lot's sky into it.
 		ApplyEnvironment(document.Environment ?? LotEnvironmentSettings.Default());
 
+		// Player data (milestone 3.12): its own archive entry, replaced wholesale — a lot without the
+		// entry (or with an unreadable one) starts with an empty store rather than inheriting the
+		// previous lot's players. An unreadable entry is reported, never half-applied; the rest of the
+		// archive is still valid.
+		string playerDataText = vfs != null ? vfs.ReadEntryText(LotArchive.PlayerDataEntry) : null;
+		if (string.IsNullOrEmpty(playerDataText))
+		{
+			PlayerData = new PlayerDataStore();
+		}
+		else if (PlayerDataStore.FromJson(playerDataText, out PlayerDataStore loadedPlayers, out int skippedPlayers, out string playerDataError))
+		{
+			PlayerData = loadedPlayers;
+			if (skippedPlayers > 0)
+			{
+				LotLog.Warn("playerdata", skippedPlayers + " player-data entries were unreadable and left out");
+				GD.PushWarning("[BuilderScene] " + skippedPlayers + " player-data entries were unreadable and left out");
+			}
+		}
+		else
+		{
+			PlayerData = new PlayerDataStore();
+			LotLog.Warn("playerdata", "player data could not be read (" + playerDataError + "); starting empty");
+			GD.PushWarning("[BuilderScene] player data could not be read: " + playerDataError);
+		}
+
 		// Collision groups are lot state too (§3.5): reset to the all-collide default then apply what
 		// the archive carried. The refresh must run *after* the matrix is in place, because the parts
 		// restored above derived their masks from whatever matrix was live at the time.
 		LotCollisionGroups.FromJson(document.Collision);
 		RefreshCollision();
+
+		// The glow pool's candidates are the old lot's parts (milestone 2.9): force its next scan
+		// so the new parts are picked up immediately rather than a scan interval later.
+		if (GlowLights != null) GlowLights.Invalidate();
 
 		// Re-issued from a clean registry, so a loaded lot numbers its entities exactly as the same lot
 		// built from scratch would — the deterministic handle order the net layer relies on (§3.2/§9).
@@ -409,6 +541,11 @@ public partial class BuilderScene : Node3D
 		// and they must exist even when the Lua runtime is unavailable (in which case the call above
 		// no-ops). Scripts have loaded by now, so script-spawned parts are in the tree to swap.
 		RebuildConstraints();
+		// Milestone 3.13: the placed query volumes come alive with the session — their build-mode
+		// previews hide and each runs the shared spatial query per frame, reporting enters and
+		// leaves through the event registry (the vocabulary reserved for exactly this).
+		QueryVolumes = new QueryVolumeSession(this);
+		QueryVolumes.Build();
 		// Milestone 3.7: the session's sensors attach on the first frame tick — OnSessionStarted
 		// marks every subscribed subject pending and the part nodes exist by now (the drain retries
 		// a subject whose node appears later).
@@ -420,6 +557,9 @@ public partial class BuilderScene : Node3D
 		if (character != null)
 		{
 			Player.Attach(character);
+			// Milestone 3.14: the authored transparency the blend fades from; the session
+			// snapshot restores it on exit regardless of where the fade left it.
+			_sessionCharacterTransparency = character.Transparency;
 		}
 		else
 		{
@@ -459,6 +599,14 @@ public partial class BuilderScene : Node3D
 		// Milestone 3.7: sensors are session artifacts — they come down with the session, before
 		// the reload below re-runs the scripts (and the reload clears the registries anyway).
 		if (Events != null) Events.OnSessionEnded();
+
+		// Milestone 3.13: query volumes are session artifacts like sensors — evaluation stops and
+		// their build-mode previews come back before the reload below.
+		if (QueryVolumes != null)
+		{
+			QueryVolumes.Teardown();
+			QueryVolumes = null;
+		}
 
 		// Milestone 3.10: the session's camera mode ends with the session (the next entry starts
 		// in third person again, and the character is visible).
@@ -552,7 +700,28 @@ public partial class BuilderScene : Node3D
 		int playerId = -1;
 		if (fromPlayer)
 		{
-			// The transport owns identity (§8.2): never a hardcoded peer id.
+			// The transport owns identity (§10.2): never a hardcoded peer id.
+			LuaNetBridge bridge = LuaManager.Instance.NetBridge;
+			playerId = bridge != null && bridge.Router != null ? bridge.Router.LocalPeerId : 1;
+		}
+		Events.Enqueue(subject, eventName, other, fromPlayer, playerId);
+	}
+
+	/// <summary>
+	/// Queues an entity-to-entity delivery (milestone 3.13's query volumes): the subject raised the
+	/// transition and <paramref name="other"/> is what entered or left it. The attribution rule is
+	/// the sensor path's — the local character's handle means it was the player, and the transport
+	/// owns the peer id (never hardcoded) — minus the body-level dedupe, because the spatial query
+	/// already reports one entry per entity.
+	/// </summary>
+	internal void EnqueueEntityContact(int subject, int other, string eventName)
+	{
+		if (Events == null || !InTestMode) return;
+		if (subject < 0 || other < 0 || other == subject) return;
+		bool fromPlayer = Player != null && Player.Character != null && other == HandleOf(Player.Character);
+		int playerId = -1;
+		if (fromPlayer)
+		{
 			LuaNetBridge bridge = LuaManager.Instance.NetBridge;
 			playerId = bridge != null && bridge.Router != null ? bridge.Router.LocalPeerId : 1;
 		}
@@ -586,7 +755,7 @@ public partial class BuilderScene : Node3D
 
 	/// <summary>A node's registry handle, or -1 (the event layer's one handle lookup; HasMeta
 	/// first, because GetMeta(name, default) logs a Godot error for a missing key).</summary>
-	private static int HandleOf(Node node)
+	internal static int HandleOf(Node node)
 	{
 		if (node == null || !GodotObject.IsInstanceValid(node) || !node.HasMeta(HandleMeta)) return -1;
 		return node.GetMeta(HandleMeta).AsInt32();
@@ -763,6 +932,17 @@ public partial class BuilderScene : Node3D
 		// up (the freecam uses actions in build mode).
 		LotInputActions.Poll();
 		if (LuaScripts != null) LuaScripts.Tick(delta);
+		// Milestone 2.9: the glow-light pool follows the nearest luminous parts. Runs in every
+		// mode and without a session (a lamp lights in build mode too); the camera is whichever one
+		// is currently current — the freecam in build mode, the player camera in a session.
+		if (GlowLights != null) GlowLights.Update(delta, LotViewport.GetCamera3D());
+		// Milestone 3.14: the zoom blend's mesh fade — session-only, written directly (no
+		// property-service write, so a view effect never touches undo or the dirty flag).
+		if (InTestMode) ApplyCharacterFade();
+		// Milestone 3.13: each placed query volume evaluates once per frame while a session runs
+		// (the physics world is queryable outside the physics step — §3.11's pinned rule); the
+		// deliveries wait for ScriptRuntime.Tick's drain like every other event.
+		if (InTestMode && QueryVolumes != null) QueryVolumes.Tick();
 #if DEBUG
 		// The net integration suite deliberately waits a few physics frames: its OOM churn and
 		// ~5M-instruction script loads would otherwise slow the startup frame enough to change the
@@ -790,7 +970,11 @@ public partial class BuilderScene : Node3D
 		}
 		// The constraint suite's staged gravity probe needs physics frames to pass (a body only
 		// moves when the engine steps), so it is advanced from here rather than inside the suite.
-		ConstraintSelfTest.TickGravityProbe();
+		// Each probe ticks only after its suite has actually run: a staged probe dereferences the
+		// session it started, and a non-headless run skips suites entirely (their probes stay
+		// idle) — an ungated call is an NRE every frame in an interactive session, exactly what
+		// CameraSelfTest's bad skip value produced before this gate existed.
+		if (_constraintSuiteDone) ConstraintSelfTest.TickGravityProbe();
 		// The event suite (milestone 3.7) runs after the constraint probe is done: both drive Test
 		// mode, and only one session probe may own the lot at a time.
 		if (!_eventSuiteDone && ConstraintSelfTest.GravityProbeDone)
@@ -798,7 +982,7 @@ public partial class BuilderScene : Node3D
 			_eventSuiteDone = true;
 			EventSelfTest.Run(this);
 		}
-		EventSelfTest.TickProbe();
+		if (_eventSuiteDone) EventSelfTest.TickProbe();
 		// The tween suite (milestone 3.8) runs after the event probe finishes: the staged probes
 		// drive Test mode one at a time.
 		if (!_tweenSuiteDone && EventSelfTest.ProbeDone)
@@ -806,28 +990,53 @@ public partial class BuilderScene : Node3D
 			_tweenSuiteDone = true;
 			TweenSelfTest.Run(this);
 		}
-		TweenSelfTest.TickProbe();
+		if (_tweenSuiteDone) TweenSelfTest.TickProbe();
 		// The input suite (milestone 3.9) runs after the tween probe finishes.
 		if (!_inputSuiteDone && TweenSelfTest.ProbeDone)
 		{
 			_inputSuiteDone = true;
 			InputSelfTest.Run(this);
 		}
-		InputSelfTest.TickProbe();
+		if (_inputSuiteDone) InputSelfTest.TickProbe();
 		// The camera suite (milestone 3.10) runs after the input probe finishes.
 		if (!_cameraSuiteDone && InputSelfTest.ProbeDone)
 		{
 			_cameraSuiteDone = true;
 			CameraSelfTest.Run(this);
 		}
-		CameraSelfTest.TickProbe();
+		if (_cameraSuiteDone) CameraSelfTest.TickProbe();
 		// The physics suite (milestone 3.11) runs after the camera probe finishes.
 		if (!_physicsSuiteDone && CameraSelfTest.ProbeDone)
 		{
 			_physicsSuiteDone = true;
 			PhysicsSelfTest.Run(this);
 		}
-		PhysicsSelfTest.TickProbe();
+		if (_physicsSuiteDone) PhysicsSelfTest.TickProbe();
+		// The player-data suite (milestone 3.12) runs after the physics probe finishes: it writes
+		// through the bound verbs inside a session, then saves and reloads the lot for real, so the
+		// "survives a lot reload" acceptance is pinned rather than assumed.
+		if (!_playerDataSuiteDone && PhysicsSelfTest.ProbeDone)
+		{
+			_playerDataSuiteDone = true;
+			PlayerDataSelfTest.Run(this);
+		}
+		if (_playerDataSuiteDone) PlayerDataSelfTest.TickProbe();
+		// The spatial-query suite (milestone 3.13) runs after the player-data probe finishes: the
+		// staged probes drive Test mode one at a time.
+		if (!_spatialSuiteDone && PlayerDataSelfTest.ProbeDone)
+		{
+			_spatialSuiteDone = true;
+			SpatialQuerySelfTest.Run(this);
+		}
+		if (_spatialSuiteDone) SpatialQuerySelfTest.TickProbe();
+		// The query-volume suite (milestone 3.13's object layer) runs after the spatial-query
+		// probe finishes: the staged probes drive Test mode one at a time.
+		if (!_queryVolumeSuiteDone && SpatialQuerySelfTest.ProbeDone)
+		{
+			_queryVolumeSuiteDone = true;
+			QueryVolumeSelfTest.Run(this);
+		}
+		if (_queryVolumeSuiteDone) QueryVolumeSelfTest.TickProbe();
 #endif
 	}
 
@@ -1260,11 +1469,26 @@ public partial class BuilderScene : Node3D
 			copy.Position = lotObject.Position;
 			copy.RotationDegrees = lotObject.RotationDegrees;
 			copy.Scale = lotObject.Scale;
+			// The authored size and the texture mapping travel with the copy (see LotObject.Size).
+			if (lotObject.HasSize)
+			{
+				copy.SetSize(lotObject.Size);
+				copy.SetTilesPerUnit(lotObject.TextureTilesPerUnit);
+				copy.SetTextureStretch(lotObject.TextureStretch);
+			}
 			// Properties travel with the copy, so duplicating a configured part is not a silent reset.
 			copy.SetAnchored(lotObject.Anchored);
 			copy.SetCanCollide(lotObject.CanCollide);
 			copy.SetCollisionGroup(lotObject.CollisionGroup);
+			copy.SetTransparency(lotObject.Transparency);
+			copy.SetLuminescence(lotObject.Luminescence);
 			if (lotObject.TextureId.Length > 0) copy.SetTexture(lotObject.TextureId);
+			// A query volume's region travels with the copy too.
+			if (lotObject.Kind == LotObjectKind.QueryVolume)
+			{
+				copy.SetQueryShape(lotObject.QueryShape);
+				copy.SetQueryRadius(lotObject.QueryRadius);
+			}
 			return copy;
 		}
 		LotUIElement uiElement = src as LotUIElement;

@@ -2,7 +2,7 @@
 
 **Audience:** creators writing lot scripts in Lua.
 **Status:** implemented for the offline/single-player path (Milestone 3.2). Real peer-to-peer
-transport arrives with §7 networking; everything below is already written so creator code does not
+transport arrives with §10 networking; everything below is already written so creator code does not
 change when it lands.
 
 ---
@@ -170,11 +170,11 @@ See `docs/design/milestone-3.2-unified-script-model.md` for the exact constants.
 
 `net.*` calls are **transient events**. A player who joins *after* `net.client.PlayCreak()` ran will
 never see it, and that is correct. Keep current world state (object existence, positions, colors,
-"is the door open") out of one-shot calls and let state sync (§7) replicate it. The pattern:
+"is the door open") out of one-shot calls and let state sync (§10) replicate it. The pattern:
 
 ```lua
 net.server.Open = function()
-    doorOpen = true              -- state (replicated by §7 sync when it lands)
+    doorOpen = true              -- state (replicated by §10 sync when it lands)
     net.client.PlayCreak()       -- event (late joiners simply miss it)
 end
 ```
@@ -192,7 +192,7 @@ end
 1 MB (also via `("x"):rep`), metatables containing `__gc` are refused, `_G` *is* your script's own
 environment, and `this` / `net` are read-only.
 
-**Coming later, not yet available:** real networking (§7), state sync, coroutines.
+**Coming later, not yet available:** real networking (§10), state sync, coroutines.
 
 ## 10. Where scripts run, and when
 
