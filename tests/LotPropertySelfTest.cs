@@ -53,7 +53,8 @@ public static class LotPropertySelfTest
 		{
 			LotPropertyDescriptor descriptor = all[i];
 			if (descriptor.Kind == LotPropertyKind.Bool && (descriptor.GetBool == null || descriptor.SetBool == null)) accessorsComplete = false;
-			if (descriptor.Kind == LotPropertyKind.Choice && (descriptor.GetChoice == null || descriptor.SetChoice == null || descriptor.ListOptions == null)) accessorsComplete = false;
+			if (descriptor.Kind == LotPropertyKind.Choice && (descriptor.GetChoice == null || descriptor.SetChoice == null
+				|| (descriptor.ListOptions == null && descriptor.ListOptionsFor == null))) accessorsComplete = false;
 			if (descriptor.Kind == LotPropertyKind.Float && (descriptor.GetFloat == null || descriptor.SetFloat == null)) accessorsComplete = false;
 			if (descriptor.Kind == LotPropertyKind.Text && (descriptor.GetText == null || descriptor.SetText == null)) accessorsComplete = false;
 			if (descriptor.AppliesTo == null) accessorsComplete = false;
@@ -67,8 +68,23 @@ public static class LotPropertySelfTest
 
 		LotUIElement uiElement = LotUIElement.Create(LotUIKind.Frame, Vector2.Zero, new Vector2(10f, 10f), "");
 		LotPropertyRegistry.CollectFor(uiElement, buffer);
-		Check("registry: a UI element collects nothing yet (no UI properties declared)", buffer.Count == 0);
+		Check("registry: a frame collects no UI label row (nothing to label)", buffer.Count == 0);
 		Free(uiElement);
+
+		// Milestone 5.3: the UI customization rows are declared and scoped to the kinds that use them.
+		LotUIElement checkbox = LotUIElement.Create(LotUIKind.Checkbox, Vector2.Zero, new Vector2(10f, 10f), "C");
+		LotPropertyRegistry.CollectFor(checkbox, buffer);
+		Check("registry: a checkbox collects Label, Text Align and Checked",
+			HasDescriptor(buffer, "label") && HasDescriptor(buffer, "ui_text_align") && HasDescriptor(buffer, "ui_checked"));
+		Check("registry: a checkbox collects no dropdown rows",
+			!HasDescriptor(buffer, "ui_options") && !HasDescriptor(buffer, "ui_selected"));
+		Free(checkbox);
+
+		LotUIElement dropdown = LotUIElement.Create(LotUIKind.Dropdown, Vector2.Zero, new Vector2(10f, 10f), "");
+		LotPropertyRegistry.CollectFor(dropdown, buffer);
+		Check("registry: a dropdown collects Options and Selected (and no label row)",
+			HasDescriptor(buffer, "ui_options") && HasDescriptor(buffer, "ui_selected") && !HasDescriptor(buffer, "label"));
+		Free(dropdown);
 	}
 
 	/// <summary>Writes a Bool property through its descriptor and reads it back.</summary>
@@ -230,6 +246,16 @@ public static class LotPropertySelfTest
 	private static void Free(Node node)
 	{
 		if (node != null && GodotObject.IsInstanceValid(node)) node.Free();
+	}
+
+	/// <summary>True when a collected buffer holds the descriptor with the given id.</summary>
+	private static bool HasDescriptor(List<LotPropertyDescriptor> buffer, string id)
+	{
+		for (int i = 0; i < buffer.Count; i++)
+		{
+			if (buffer[i].Id == id) return true;
+		}
+		return false;
 	}
 
 	private static void Check(string name, bool condition)

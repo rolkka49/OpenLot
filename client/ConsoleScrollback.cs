@@ -31,6 +31,17 @@ public sealed class ConsoleScrollback
 	/// <summary>Lines currently held (≤ <see cref="Capacity"/>).</summary>
 	public int Count { get { return _count; } }
 
+	/// <summary>
+	/// How many lines have ever been added: a monotonic id counter, so the newest held line's
+	/// absolute id is <c>TotalAdded - 1</c>. A selection stores absolute ids rather than indices
+	/// (<see cref="ConsoleSelection"/>) so a line dropping off the front of the ring cannot shift
+	/// what is selected.
+	/// </summary>
+	public long TotalAdded { get; private set; }
+
+	/// <summary>The absolute id of the oldest held line — the ring's shifting window origin.</summary>
+	public long BaseId { get { return TotalAdded - _count; } }
+
 	public void Add(string text, Color color)
 	{
 		int index;
@@ -46,6 +57,7 @@ public sealed class ConsoleScrollback
 			_head = (_head + 1) % Capacity;
 		}
 		_lines[index] = new Line { Text = text, Color = color };
+		TotalAdded++;
 	}
 
 	/// <summary>The line at a logical index (0 = oldest). Behaviour is undefined out of range.</summary>
@@ -54,10 +66,44 @@ public sealed class ConsoleScrollback
 		return _lines[(_head + index) % Capacity];
 	}
 
+	/// <summary>
+	/// The line that was added at absolute id <paramref name="id"/> and is still held. False once it
+	/// has been dropped off the front — which is how the selection survives (or deliberately ends)
+	/// across the ring's own trimming.
+	/// </summary>
+	public bool TryGetAbsolute(long id, out Line line)
+	{
+		long index = id - BaseId;
+		if (index < 0 || index >= _count)
+		{
+			line = default(Line);
+			return false;
+		}
+		line = At((int)index);
+		return true;
+	}
+
 	/// <summary>Drops every line.</summary>
 	public void Clear()
 	{
 		_head = 0;
 		_count = 0;
+	}
+
+	/// <summary>
+	/// The whole buffer as one newline-joined string — the terminal's "copy all output" payload.
+	/// Built on demand (never per frame): the console draws line by line and only a copy gesture
+	/// needs the joined form, so this allocates only when the user asks to copy.
+	/// </summary>
+	public string ToText()
+	{
+		if (_count == 0) return "";
+		System.Text.StringBuilder text = new System.Text.StringBuilder();
+		for (int i = 0; i < _count; i++)
+		{
+			if (i > 0) text.Append('\n');
+			text.Append(At(i).Text);
+		}
+		return text.ToString();
 	}
 }

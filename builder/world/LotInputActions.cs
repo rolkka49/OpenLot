@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Godot;
 
 /// <summary>
@@ -94,10 +95,21 @@ public static class LotInputActions
 	}
 
 	/// <summary>
-	/// Swaps one action's KEYBOARD events for a single key (gamepad events stay). The in-memory
-	/// half of §5.5's rebinding; the settings UI and persistence land with that milestone.
+	/// Swaps one action's KEYBOARD events for a single key (gamepad events stay) — the single-key form
+	/// of <see cref="RebindKeys"/>.
 	/// </summary>
 	public static void Rebind(string actionName, Key key)
+	{
+		RebindKeys(actionName, new[] { key });
+	}
+
+	/// <summary>
+	/// Swaps one action's KEYBOARD events for the given keys (gamepad events stay), so an action can
+	/// be bound to several keys at once — "save" on both Ctrl+S and Enter, movement on two sets of
+	/// keys. An empty list unbinds the action's keyboard shortcuts; gamepad bindings are never
+	/// touched (pad rebinding is §16.1's).
+	/// </summary>
+	public static void RebindKeys(string actionName, IReadOnlyList<Key> keys)
 	{
 		int index = IndexOf(actionName);
 		if (index < 0) return;
@@ -111,7 +123,11 @@ public static class LotInputActions
 				InputMap.ActionEraseEvent(name, existing[i]);
 			}
 		}
-		InputMap.ActionAddEvent(name, KeyEvent(key));
+		if (keys == null) return;
+		for (int i = 0; i < keys.Count; i++)
+		{
+			InputMap.ActionAddEvent(name, KeyEvent(keys[i]));
+		}
 	}
 
 	private static InputEventKey KeyEvent(Key key)

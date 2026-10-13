@@ -297,7 +297,12 @@ public class ToolboxPanel
 		if (ImGui.Button("Button", 120f, 30f)) SpawnUi(builder, LotUIKind.Button);
 		if (ImGui.Button("Text", 120f, 30f)) SpawnUi(builder, LotUIKind.Text);
 		ImGui.SameLine();
+		if (ImGui.Button("Checkbox", 120f, 30f)) SpawnUi(builder, LotUIKind.Checkbox);
+		if (ImGui.Button("Dropdown", 120f, 30f)) SpawnUi(builder, LotUIKind.Dropdown);
+		ImGui.SameLine();
 		if (ImGui.Button("Scrollbar", 120f, 30f)) SpawnUi(builder, LotUIKind.Scrollbar);
+		if (ImGui.Button("Scroll Area", 120f, 30f)) SpawnUi(builder, LotUIKind.ScrollContainer);
+		ImGui.TextDisabled("A Scroll Area holds other UI elements as children.");
 
 		ImGui.Spacing();
 		ImGui.Text("UI Transform Tool");
@@ -351,8 +356,16 @@ public class ToolboxPanel
 		Vector2 pos = bounds * 0.5f - size * 0.5f;
 		UiGizmoMath.ClampRect(ref pos, ref size, bounds);
 
-		string label = kind == LotUIKind.Button ? "Button" : (kind == LotUIKind.Text ? "New Label" : "");
+		string label = kind == LotUIKind.Button ? "Button"
+			: (kind == LotUIKind.Text ? "New Label" : (kind == LotUIKind.Checkbox ? "Checkbox" : ""));
 		LotUIElement el = builder.Scene.CreateUIElementDetached(kind, pos, size, label);
+		// A dropdown with no options would be an empty box; seed three so it is usable at once (the
+		// same courtesy the new decal's image browser provides).
+		if (kind == LotUIKind.Dropdown)
+		{
+			el.SetOptionsFromText("Option A|Option B|Option C");
+			el.SelectedIndex = 0;
+		}
 		builder.History.Push(new CreateNodeCommand("Create " + kind, el, builder.Scene.LotUIRoot,
 			builder.Scene.LotUIRoot.GetChildCount(), b => b.Selection.Select(el, false)));
 	}

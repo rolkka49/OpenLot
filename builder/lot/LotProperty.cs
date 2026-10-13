@@ -45,6 +45,13 @@ public sealed class LotPropertyDescriptor
 	// Choice properties. ListOptions supplies the current option list, so a live list (registered
 	// image assets, for instance) does not need to be cached and invalidated by hand.
 	public Func<string[]> ListOptions;
+	/// <summary>
+	/// A per-node option list, for a Choice whose choices belong to the node itself (milestone
+	/// 5.3's dropdown selection, whose options are the element's own). When set it wins over
+	/// <see cref="ListOptions"/>, which stays for the node-independent lists every earlier Choice
+	/// uses.
+	/// </summary>
+	public Func<Node, string[]> ListOptionsFor;
 	public Func<Node, string> GetChoice;
 	public Action<Node, string> SetChoice;
 
@@ -175,6 +182,36 @@ public static class LotPropertyRegistry
 	private static bool IsSurfaceMapped(Node node)
 	{
 		return node is LotObject part && part.HasSize && part.Kind != LotObjectKind.QueryVolume;
+	}
+
+	// --- Lot UI element selectors (milestone 5.3) ---
+	// A lot UI element carries its own customization rows; they never apply to a part, and the
+	// kind-specific rows (checkbox state, dropdown options/selection) only to the kind that uses
+	// them — the same per-kind split IsPart/IsDecal established.
+
+	/// <summary>The kinds that show a text label: a button, a text element or a checkbox. A frame,
+	/// a scrollbar and a scroll container have nothing to label.</summary>
+	private static bool IsUiLabelled(Node node)
+	{
+		return node is LotUIElement ui
+			&& (ui.Kind == LotUIKind.Button || ui.Kind == LotUIKind.Text || ui.Kind == LotUIKind.Checkbox);
+	}
+
+	/// <summary>Every UI kind that draws text — the alignment row's scope: the labelled kinds plus
+	/// the dropdown's selected-value text.</summary>
+	private static bool IsUiText(Node node)
+	{
+		return IsUiLabelled(node) || IsUiDropdown(node);
+	}
+
+	private static bool IsUiCheckbox(Node node)
+	{
+		return node is LotUIElement ui && ui.Kind == LotUIKind.Checkbox;
+	}
+
+	private static bool IsUiDropdown(Node node)
+	{
+		return node is LotUIElement ui && ui.Kind == LotUIKind.Dropdown;
 	}
 
 	/// <summary>
@@ -551,6 +588,77 @@ public static class LotPropertyRegistry
 			Speed = 1f,
 			GetFloat = node => ((LotObject)node).DecalFontSize,
 			SetFloat = (node, value) => ((LotObject)node).SetDecalFontSize(value)
+		});
+
+		// --- Lot UI customization (milestone 5.3) ---
+		// The element's own editable properties, declared like any other so the Inspector widget,
+		// undo, lot.json and the session snapshot all come from one table. The rect, the color, the
+		// visibility and the draw order keep their existing editing paths (design doc D5).
+
+		Register(new LotPropertyDescriptor
+		{
+			Id = "label",
+			DisplayName = "Label",
+			Kind = LotPropertyKind.Text,
+			Category = "UI",
+			Doc = "The element's text: a button's caption, a text element's content or a checkbox's " +
+				"label. A dropdown shows its selected option instead.",
+			AppliesTo = IsUiLabelled,
+			GetText = node => ((LotUIElement)node).Label,
+			SetText = (node, value) => ((LotUIElement)node).Label = value ?? ""
+		});
+
+		Register(new LotPropertyDescriptor
+		{
+			Id = "ui_text_align",
+			DisplayName = "Text Align",
+			Kind = LotPropertyKind.Choice,
+			Category = "UI",
+			Doc = "Where the element's text sits horizontally: left, centred or right.",
+			AppliesTo = IsUiText,
+			ListOptions = () => LotUiRenderer.TextAlignNames,
+			GetChoice = node => LotUiRenderer.AlignName(((LotUIElement)node).TextAlign),
+			SetChoice = (node, value) => ((LotUIElement)node).TextAlign = LotUiRenderer.AlignFromName(value)
+		});
+
+		Register(new LotPropertyDescriptor
+		{
+			Id = "ui_checked",
+			DisplayName = "Checked",
+			Kind = LotPropertyKind.Bool,
+			Category = "UI",
+			Doc = "Whether the checkbox is ticked. A script reads it with GetUIChecked and is notified " +
+				"through its clicked handler when the player toggles it.",
+			AppliesTo = IsUiCheckbox,
+			GetBool = node => ((LotUIElement)node).Checked,
+			SetBool = (node, value) => ((LotUIElement)node).Checked = value
+		});
+
+		Register(new LotPropertyDescriptor
+		{
+			Id = "ui_options",
+			DisplayName = "Options",
+			Kind = LotPropertyKind.Text,
+			Category = "UI",
+			Doc = "The dropdown's choices, separated by '|' (up to " + LotUIElement.MaxOptions + "). " +
+				"Editing the list clears a selection whose text no longer exists.",
+			AppliesTo = IsUiDropdown,
+			GetText = node => ((LotUIElement)node).OptionsToText(),
+			SetText = (node, value) => ((LotUIElement)node).SetOptionsFromText(value)
+		});
+
+		Register(new LotPropertyDescriptor
+		{
+			Id = "ui_selected",
+			DisplayName = "Selected",
+			Kind = LotPropertyKind.Choice,
+			Category = "UI",
+			Doc = "Which option the dropdown shows. The list is the element's own options, so it " +
+				"follows the Options row.",
+			AppliesTo = IsUiDropdown,
+			ListOptionsFor = node => ((LotUIElement)node).Options.ToArray(),
+			GetChoice = node => ((LotUIElement)node).SelectedOption(),
+			SetChoice = (node, value) => ((LotUIElement)node).SetSelectedByName(value)
 		});
 	}
 }

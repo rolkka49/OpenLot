@@ -78,6 +78,22 @@ public class SelectionManager
 		return _selected.Contains(node);
 	}
 
+	/// <summary>
+	/// Copies the current selection into <paramref name="destination"/> in selection order, pruning
+	/// freed nodes on the way. The read the multi-node editor operations need (delete acts on the
+	/// whole selection, not just its first entry) — the selection list itself stays private, so a
+	/// caller cannot mutate it by accident.
+	/// </summary>
+	public void CopySelection(List<Node> destination)
+	{
+		destination.Clear();
+		for (int i = _selected.Count - 1; i >= 0; i--)
+		{
+			if (!GodotObject.IsInstanceValid(_selected[i])) _selected.RemoveAt(i);
+		}
+		for (int i = 0; i < _selected.Count; i++) destination.Add(_selected[i]);
+	}
+
 	/// <summary>First selected node, pruning freed ones; null when nothing is selected.</summary>
 	public Node GetFirstValid()
 	{

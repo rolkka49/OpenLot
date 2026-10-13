@@ -16,17 +16,18 @@ public sealed class OutputWindow : IEditorWindow
 {
 	private const float ScrollSlack = 8f;   // pixels from the bottom that still count as "at bottom"
 
-	/// <summary>Severity colours. The terminal's roles are the starting palette, per the milestone.</summary>
-	private static readonly Color InfoColor = new Color(0.86f, 0.86f, 0.86f);
-	private static readonly Color WarnColor = new Color(0.95f, 0.75f, 0.3f);
-	private static readonly Color ErrorColor = new Color(0.95f, 0.35f, 0.35f);
+	// Severity colours come from the shared theme service (milestone 5.4) at draw time, so a theme
+	// change retints the Output window without a restart — see ColorFor below.
 
 	private bool _showInfo = true;
 	private bool _showWarn = true;
 	private bool _showError = true;
 	private bool _jumpRequested;
 
-	public bool IsOpen { get; private set; }
+	/// <summary>Open at startup — the creation environment's Output is an expected surface (it is
+	/// where Lua errors, save outcomes and archive warnings land), so it starts visible and the
+	/// creator closes it if they do not want it. Add Window can reopen it.</summary>
+	public bool IsOpen { get; private set; } = true;
 
 	/// <summary>Add Window menu label (IEditorWindow); the drawn title appends the live count.</summary>
 	public string Title { get { return "Output"; } }
@@ -40,9 +41,12 @@ public sealed class OutputWindow : IEditorWindow
 		ImGui.SetNextWindowSize(560f, 300f, ImGui.CondFirstUseEver);
 		ImGui.SetNextWindowPos(360f, 430f, ImGui.CondFirstUseEver);
 
-		// The id is pinned with "##Output" so the count in the visible title can change every frame
-		// (a new entry) without ImGui treating it as a different window.
-		string title = "Output (" + LotLog.Count + ")##Output";
+		// The title carries the live entry count, and the id is pinned with "###Output" (THREE
+		// hashes: the text after ### is used as the window id and is not displayed). With the "##"
+		// form ImGui still hashes the WHOLE name, so every new entry produced a different window id
+		// — a brand-new window that re-applied its first-use position, which is why clearing the log
+		// (or any new line) made the window jump across the screen.
+		string title = "Output (" + LotLog.Count + ")###Output";
 		bool open = ImGui.Begin(title, EditorChrome.PanelWindowFlags);
 		if (!open)
 		{
@@ -55,8 +59,10 @@ public sealed class OutputWindow : IEditorWindow
 		if (ImGui.BeginChild("ScrollingRegion", 0, 0))
 		{
 			DrawRows();
-			ImGui.EndChild();
 		}
+		// EndChild() is unconditional: BeginChild() returns false for a clipped/collapsed child,
+		// which skips the body but not the pairing ImGui requires.
+		ImGui.EndChild();
 
 		ImGui.End();
 	}
@@ -129,14 +135,16 @@ public sealed class OutputWindow : IEditorWindow
 		}
 	}
 
-	/// <summary>The one severity-to-colour mapping (the §5.4 theme service's future home).</summary>
+	/// <summary>The one severity-to-colour mapping, now read from the shared theme service (§5.4):
+	/// Info as the foreground role, Warn as the warning role, Error as the error role. Read live so a
+	/// theme change applies immediately.</summary>
 	public static Color ColorFor(LotLogSeverity severity)
 	{
 		switch (severity)
 		{
-			case LotLogSeverity.Warn: return WarnColor;
-			case LotLogSeverity.Error: return ErrorColor;
-			default: return InfoColor;
+			case LotLogSeverity.Warn: return ThemeService.Role(ThemeRole.Warning);
+			case LotLogSeverity.Error: return ThemeService.Role(ThemeRole.Error);
+			default: return ThemeService.Role(ThemeRole.Foreground);
 		}
 	}
 }

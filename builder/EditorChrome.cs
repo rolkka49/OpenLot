@@ -12,11 +12,11 @@ using Godot;
 /// (ImGui's other per-window double-click action), so no window can be blown up or folded away by
 /// accident. Windows remain freely movable and resizable; only dock/rearrange is given up.
 ///
-/// A panel that needs its *body* for a mouse gesture (the hierarchy's marquee) additionally begins
-/// with <see cref="ImGui.WindowNoMove"/> and re-grants movement through
-/// <see cref="TitleBarWindowDrag"/>, because ImGui's own "move from title bar only" option is another
-/// IO setting the addon does not expose — so without that combination a drag in the panel body would
-/// both move the window and swallow the gesture.
+/// A panel that needs its *body* for a mouse gesture (the hierarchy's marquee, the terminal
+/// console's text selection) additionally begins with <see cref="ImGui.WindowNoMove"/> and re-grants
+/// movement through <see cref="TitleBarWindowDrag"/>, because ImGui's own "move from title bar only"
+/// option is another IO setting the addon does not expose — so without that combination a drag in the
+/// panel body would both move the window and swallow the gesture.
 /// </summary>
 public static class EditorChrome
 {

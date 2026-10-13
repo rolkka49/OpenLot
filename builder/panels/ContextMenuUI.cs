@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Godot;
 
 /// <summary>
@@ -7,6 +8,11 @@ using Godot;
 /// </summary>
 public static class ContextMenuUI
 {
+	/// <summary>One-element list for the delete path — reused so a right-click delete on an
+	/// unselected row (which cannot happen through the hierarchy's own menu, but is possible from a
+	/// future caller) allocates nothing.</summary>
+	private static readonly List<Node> _singleTarget = new List<Node>(1);
+
 	public static void DrawForNode(Builder builder, Node target)
 	{
 		bool isUi = target is LotUIElement;
@@ -28,8 +34,22 @@ public static class ContextMenuUI
 			}
 		}
 		ImGui.EndDisabled();
-		if (ImGui.MenuItem("Delete"))
-			builder.Scene.DeleteNode(target);
+		// Delete acts on the whole selection, not just the right-clicked row — the hierarchy selects
+		// an unselected row before opening this menu, so the multi-selection is the set the creator
+		// right-clicked into. One history entry for the set, so a single Ctrl+Z brings it all back.
+		bool inSelection = builder.Selection.IsSelected(target);
+		int count = builder.Selection.Count;
+		string deleteLabel = inSelection && count > 1 ? "Delete " + count + " Objects" : "Delete";
+		if (ImGui.MenuItem(deleteLabel))
+		{
+			if (inSelection) builder.DeleteSelection();
+			else
+			{
+				_singleTarget.Clear();
+				_singleTarget.Add(target);
+				builder.Scene.DeleteNodes(_singleTarget);
+			}
+		}
 		ImGui.BeginDisabled(isUi || isScript || isDecal);
 		if (ImGui.MenuItem("Turn to Model"))
 			builder.Scene.TurnToModel((Node3D)target);

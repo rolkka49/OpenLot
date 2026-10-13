@@ -4,17 +4,36 @@ using System;
 /// The terminal's built-in command set, kept apart from <see cref="CommandRegistry"/> so the
 /// registry stays a generic engine any component can register into (the post-3.11 friction
 /// review): packages and plugins use the same surface later (§13.1/§18.2). Each registration
-/// carries its description, its handler, and — when it has one — its first-argument vocabulary
-/// for ghost auto-complete.
+/// carries its description, its handler, its first-argument vocabulary for ghost auto-complete
+/// (when it has one), and its auth-gate flag.
 ///
 /// The handlers close over the <see cref="Terminal"/> instance they were registered for, exactly
 /// as they did inside the registry before; nothing about their behaviour changed in the move.
 /// </summary>
 public static class TerminalCommands
 {
+	/// <summary>
+	/// Commands that work before this device's account is unlocked (§5.1's auth gate). Everything
+	/// else is locked until <c>login</c>/<c>register</c> has run. <c>unregister</c> is here on
+	/// purpose: the case it exists for — a lost key — leaves the device locked out, so it must be
+	/// reachable without signing in. Kept as data so the gate's flags cannot drift apart from the
+	/// list, and so the list itself is verifiable headless (the Terminal node cannot be instantiated
+	/// in a suite).
+	/// </summary>
+	public static readonly string[] PreLoginCommands = { "help", "clear", "login", "register", "unregister" };
+
+	private static bool RequiresLogin(string name) => Array.IndexOf(PreLoginCommands, name) < 0;
+
 	public static void RegisterCore(CommandRegistry registry, Terminal terminal)
 	{
-		registry.RegisterCommand("help", "Lists all available commands.", (args) =>
+		// Every core registration goes through this helper so the pre-login whitelist above is the
+		// single source of truth for the gate: a command added here is locked by default.
+		void Register(string name, string description, Action<string[]> handler, string[] subcommands = null)
+		{
+			registry.RegisterCommand(name, description, handler, subcommands, RequiresLogin(name));
+		}
+
+		Register("help", "Lists all available commands.", (args) =>
 		{
 			terminal.LogLine("Available commands:");
 			foreach (CommandRegistry.Command cmd in registry.All)
@@ -23,7 +42,7 @@ public static class TerminalCommands
 			}
 		});
 
-		registry.RegisterCommand("openlot", "Core OpenLot system commands (join, host, create).", (args) =>
+		Register("openlot", "Core OpenLot system commands (join, host, list, create).", (args) =>
 		{
 			if (args.Length == 0)
 			{
@@ -40,6 +59,11 @@ public static class TerminalCommands
 			{
 				terminal.LogLine($"Starting local host server for lot: {args[1]}...");
 			}
+			else if (subCommand == "list")
+			{
+				// The same rows `ls` prints, in the navigable TUI window.
+				terminal.ShowLotList();
+			}
 			else if (subCommand == "create")
 			{
 				terminal.StartLotCreation();
@@ -50,9 +74,14 @@ public static class TerminalCommands
 			}
 		}, new string[] { "join", "host", "list", "create" });
 
-		registry.RegisterCommand("clear", "Clears the terminal output.", (args) => terminal.Clear());
+		Register("ls", "Lists the lots available on this device.", (args) => terminal.ListLots());
 
-		registry.RegisterCommand("wallpaper", "Sets the desktop wallpaper behind the UI (no argument opens the file browser).", (args) =>
+		Register("clear", "Clears the terminal output.", (args) => terminal.Clear());
+
+		Register("alias", "Defines a command shortcut (alias <name>=<command>; alias -r <name> removes).",
+			(args) => terminal.HandleAliasCommand(args));
+
+		Register("wallpaper", "Sets the desktop wallpaper behind the UI (no argument opens the file browser).", (args) =>
 		{
 			string sub = args.Length > 0 ? args[0].ToLower() : "set";
 
@@ -82,7 +111,13 @@ public static class TerminalCommands
 			terminal.LogLine("Usage: wallpaper [set|clear|status]  (no argument opens the file browser)");
 		}, new string[] { "set", "clear", "status" });
 
-		registry.RegisterCommand("neofetch", "Displays system and platform information.", (args) =>
+		Register("theme", "Lists or applies UI themes, colours and fonts (theme <preset> | theme foreground|background <color> | theme font [console] <name>).",
+			(args) => terminal.HandleThemeCommand(args), new string[] { "foreground", "background", "font" });
+
+		Register("avatar", "Avatar controls. Placeholder until rigged characters land (milestone 7.1).",
+			(args) => terminal.HandleAvatarCommand(args), new string[] { "list", "equip" });
+
+		Register("neofetch", "Displays system and platform information.", (args) =>
 		{
 			ulong uptime = Godot.Time.GetTicksMsec() / 1000;
 			terminal.LogLine(
@@ -95,9 +130,11 @@ public static class TerminalCommands
 			);
 		});
 
-		registry.RegisterCommand("sysinfo", "Displays system information.", (args) => registry.Execute("neofetch"));
+		// Internal delegation, deliberately through the registry: neofetch is itself a registered
+		// command, and this call is already inside sysinfo's own gated dispatch (§5.1).
+		Register("sysinfo", "Displays system information.", (args) => registry.Execute("neofetch"));
 
-		registry.RegisterCommand("motd", "Prints the Message of the Day.", (args) =>
+		Register("motd", "Prints the Message of the Day.", (args) =>
 		{
 			string[] quotes = new string[]
 			{
@@ -110,38 +147,38 @@ public static class TerminalCommands
 			terminal.LogLine($"MOTD: {randomQuote}");
 		});
 
-		registry.RegisterCommand("ping", "Pings the local network hub.", (args) =>
+		Register("ping", "Pings the local network hub.", (args) =>
 		{
 			long fakePing = Godot.GD.Randi() % 77 + 12;
 			terminal.LogLine($"Pong! Reply from local_node: time={fakePing}ms TTL=64");
 		});
 
-		registry.RegisterCommand("matrix", "Wake up, Neo...", (args) =>
+		Register("matrix", "Wake up, Neo...", (args) =>
 		{
 			terminal.LogLine("01001111 01010000 01000101 01001110 01001100 01001111 01010100");
 			terminal.LogLine("Analyzing host grid... Connection secure.");
 			terminal.LogLine("You are in the lot now.");
 		});
 
-		registry.RegisterCommand("register", "Creates this device's OpenLot account (generates its key).", (args) =>
+		Register("register", "Creates this device's OpenLot account (generates its key).", (args) =>
 		{
 			if (args.Length == 0) { terminal.LogLine("Usage: register <display name>"); return; }
 			terminal.RegisterNewAccount(string.Join(" ", args));
 		});
 
-		registry.RegisterCommand("login", "Unlocks this device's account, or imports one from its 50-character key.", (args) =>
+		Register("login", "Unlocks this device's account, or imports one from its 50-character key.", (args) =>
 		{
 			if (args.Length == 0) { terminal.LoginStoredAccount(); return; }
 			terminal.ImportAccount(args[0], args.Length > 1 ? string.Join(" ", args, 1, args.Length - 1) : "");
 		});
 
-		registry.RegisterCommand("logout", "Terminates the active session.", (args) => terminal.LogoutUser());
-		registry.RegisterCommand("disconnect", "Terminates the active physical lot connection.", (args) => terminal.DisconnectAndUnload());
+		Register("unregister", "Deletes this device's account (the key cannot be recovered). Requires 'unregister confirm'.", (args) =>
+			terminal.UnregisterAccount(args), new string[] { "confirm" });
 
-		// Vocabulary for the §5.1 parity stubs — `theme` and `avatar` complete in the ghost today
-		// but are not commands yet. Registered as vocabulary only so nothing claims to be a
-		// command; when those commands land they move to RegisterCommand's subcommands parameter.
-		registry.RegisterSubCommandVocabulary("theme", new string[] { "foreground", "background" });
-		registry.RegisterSubCommandVocabulary("avatar", new string[] { "list", "equip" });
+		Register("logout", "Terminates the active session.", (args) => terminal.LogoutUser());
+		Register("disconnect", "Terminates the active physical lot connection.", (args) => terminal.DisconnectAndUnload());
+
+		// `theme` and `avatar` were ghost-completion-only stubs until this pass; they are real
+		// commands now (above), so their standalone vocabulary registrations are gone with them.
 	}
 }

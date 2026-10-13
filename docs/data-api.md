@@ -13,12 +13,16 @@ id; the save/autosave pipeline carries them, and a lot reload keeps them.
   reload, a restart, or on another day — and the id cannot be faked by another player.
 * The device's own player is `Lot.GetLocalPlayer()` — the account registered on this device, or a
   local guest id when there is no account yet.
+* `Lot.GetLocalPlayerName()` is that player's **display name** — the name entered at
+  `register`/`login`. It is presentation only (`""` for a guest): names can collide and are never an
+  identity, so key data by `GetLocalPlayer()`, never by the name.
 * A value lives under a **key** you choose. Keys are yours; the engine stores what you give it.
 
 ## 2. The verbs
 
 ```lua
 local me = Lot.GetLocalPlayer()
+local who = Lot.GetLocalPlayerName()             -- the display name, "" for a guest
 
 Lot.SetPlayerValue(me, "coins", 50)             -- number, string or boolean
 local coins = Lot.GetPlayerValue(me, "coins")   -- 50; nil when never set
@@ -28,6 +32,7 @@ Lot.RemovePlayerValue(me, "coins")              -- true when something was remov
 | Call | Returns |
 |---|---|
 | `Lot.GetLocalPlayer()` | This device's player id (a 22-character string) |
+| `Lot.GetLocalPlayerName()` | The local display name (a string; `""` for a guest) |
 | `Lot.SetPlayerValue(player, key, value)` | `true` when stored; `false` (with an Output warning) when refused |
 | `Lot.GetPlayerValue(player, key)` | The value; `nil` when the key was never set |
 | `Lot.RemovePlayerValue(player, key)` | `true` when a value was removed |

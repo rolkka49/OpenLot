@@ -61,6 +61,7 @@ public partial class BuilderScene : Node3D
 	private const int IntegrationSuitePhysicsDelay = 8;
 	private bool _integrationSuiteDone;
 	private bool _editorSuiteDone;
+	private bool _outlineSuiteDone;
 	private bool _constraintSuiteDone;
 	private bool _eventSuiteDone;
 	private bool _tweenSuiteDone;
@@ -131,6 +132,10 @@ public partial class BuilderScene : Node3D
 	private readonly Dictionary<int, Node> _handles = new Dictionary<int, Node>();
 	private int _nextHandle = 1;
 
+	/// <summary>Reused by <see cref="DeleteNodes"/> so a multi-item delete allocates nothing beyond
+	/// the command that records it.</summary>
+	private readonly List<Node> _deleteScratch = new List<Node>();
+
 	/// <summary>
 	/// The lot's event registry (milestone 3.7): subscriptions, the per-frame delivery queue and
 	/// the sensor bookkeeping. Created in <see cref="_Ready"/> before any script runs (a script may
@@ -140,6 +145,9 @@ public partial class BuilderScene : Node3D
 	/// to.
 	/// </summary>
 	public LotEventRegistry Events { get; private set; }
+	/// <summary>In-session lot UI press routing (milestone 5.3): the overlay reports activated
+	/// elements and this queues their <c>clicked</c> deliveries.</summary>
+	public SessionInputRouter UiInput { get; private set; }
 
 	/// <summary>
 	/// The lot's tween/timer scheduler (milestone 3.8): created in <see cref="_Ready"/> beside the
@@ -174,6 +182,8 @@ public partial class BuilderScene : Node3D
 
 	private string _localPlayerId;
 
+	private string _localPlayerName;
+
 	/// <summary>
 	/// This device's player id (milestone 3.12, design doc D2): the stored account's Account ID when
 	/// one exists, otherwise a machine-local guest id. Resolved lazily and cached per scene —
@@ -191,6 +201,27 @@ public partial class BuilderScene : Node3D
 					: GuestIdentity.GetOrCreate();
 			}
 			return _localPlayerId;
+		}
+	}
+
+	/// <summary>
+	/// This device's display name (milestone 3.12a): the name entered at register/import, read from
+	/// the stored account — "" for a guest, who has no profile. Presentation only: it is never an
+	/// identity (names can collide; the stable key is <see cref="LocalPlayerId"/>), and it is what a
+	/// script shows on a nameplate or a welcome line. Carrying it to *other* players' screens is
+	/// §10.1's handshake, not this scene. Cached alongside the id, with the same lifetime rule.
+	/// </summary>
+	public string LocalPlayerName
+	{
+		get
+		{
+			if (_localPlayerName == null)
+			{
+				_localPlayerName = AccountStore.TryLoad(AccountStore.DefaultPath, out AccountRecord record, out string _)
+					? record.DisplayName ?? ""
+					: "";
+			}
+			return _localPlayerName;
 		}
 	}
 
@@ -230,6 +261,13 @@ public partial class BuilderScene : Node3D
 		// lot frees everything under LotRoot, and the pool must outlive that swap. Its scan root is
 		// the lot container, so candidates are exactly the lot's parts.
 		GlowLights = new LotGlowLights(LotViewport, LotRoot);
+		// Camera and graphics settings (§5.4): subscribe first, then push the restored values onto
+		// the viewport and both cameras. The subscriptions are dropped in _ExitTree, so an edit made
+		// while this scene is gone can never reach a freed node.
+		CameraSettingsService.Changed += ApplyCameraSettings;
+		GraphicsSettingsService.Changed += ApplyGraphicsSettings;
+		ApplyCameraSettings();
+		ApplyGraphicsSettings();
 		// Milestone 3.12: the per-player store exists from the first frame, so a script may read and
 		// write player data (and a later load may replace the store) without a null phase.
 		PlayerData = new PlayerDataStore();
@@ -246,6 +284,10 @@ public partial class BuilderScene : Node3D
 		Events.DetachSensor = DetachEventSensor;
 		Events.SessionActive = () => InTestMode;
 		Events.Dispatch = DispatchEventToLua;
+
+		// Milestone 5.3: the lot UI overlay's in-session press path — the overlay reports the
+		// elements a player activated and this queues one `clicked` delivery each.
+		UiInput = new SessionInputRouter(this);
 
 		// Milestone 3.8: the tween/timer scheduler, wired to the handle registry (targets), the
 		// CURRENT VM's bridge (timer callbacks) and the clamped UI-rect writer, so a tween can no
@@ -286,6 +328,22 @@ public partial class BuilderScene : Node3D
 		// The terminal command surface (post-3.11 friction review): parser and registry checks —
 		// pure, no Terminal and no scene.
 		CommandSelfTest.Run();
+		// The client's font system (milestone 5.4's font clause): the bundled CC0 library, discovery
+		// of both font folders, the two slots and their persistence, plus the licence and
+		// keep-importer guards over the shipped font files. The ImGui half (creating handles) is
+		// compile-verified and eye-checked, like every other rendering-side surface.
+		FontServiceSelfTest.Run();
+		// Milestone 5.4 theme service: the seed palette the default preset restores exactly, preset
+		// coherence (palette + window shape together) and the config round-trip on a scratch file.
+		// The chrome's look on screen is eye-checked, the project's usual split.
+		ThemeSelfTest.Run();
+		// Milestone 5.4 camera + graphics settings: the defaults match the pre-milestone values, the
+		// clamps hold, and both blocks round-trip through the real config encoder on scratch files.
+		ClientSettingsSelfTest.Run();
+		// Milestone 5.5 key bindings: the defaults are the pre-5.5 keys, the chord format round-trips,
+		// conflicts are refused rather than stolen, and the editor-command resolver + capture machine
+		// follow the same rules the builder and the terminal route through.
+		KeyBindingSelfTest.Run();
 		// Milestone 3.12a account identity: the seed-only P-256 rebuild spike, the 50-character
 		// key format with its checksum/version gates, the account id, the challenge/sign/verify
 		// contract (replay rejection), the store round-trip and the session flows on scratch
@@ -324,6 +382,11 @@ public partial class BuilderScene : Node3D
 		// isolation, the archive round trip of both properties, and the budgeted glow-light pool's
 		// selection/follow/cap behaviour — all on detached fixtures, no session.
 		PartMaterialSelfTest.Run(this);
+		// Milestone 5.3 lot UI: the new element kinds and their state rules, the declared
+		// customization properties, the nesting/clip math, the archive round-trip of a nested tree
+		// and the bound Lua verbs through the real VM. Runs last in this block because it spawns
+		// (and destroys) UI elements on the live lot.
+		LotUiSelfTest.Run();
 		// Integration fixture: drives the REAL LuaManager + ScriptRuntime with real script files
 		// (stands in for hands-on testing until milestone 3.4).
 		// The heavy integration suite is deferred to _Process (see IntegrationSuitePhysicsDelay):
@@ -535,6 +598,15 @@ public partial class BuilderScene : Node3D
 
 		// Before the reload, so the snapshot is exactly the world the creator is looking at.
 		_sessionSnapshot = LotSessionSnapshot.Capture(this);
+		// ...and the authored load-time script spawns (the character among them) come out of the tree
+		// for the session's duration, untouched. Without this the reload below would free and recreate
+		// them, and the exit would have no way back to them except running every script again — which
+		// is exactly the "stopping the test re-ran my Lua instead of undoing the session" behaviour.
+		_sessionSnapshot.ParkScriptSpawns(LotRoot, LotUIRoot);
+
+		// Milestone 5.3: every placed UI element is addressable before a script loads, so a script
+		// can Subscribe to one by name at start() time (design doc D8).
+		EnsureUiElementHandles();
 
 		StartScriptRuntime();
 		// Deliberately OUTSIDE StartScriptRuntime: the session's body swap and joints are physics,
@@ -588,6 +660,9 @@ public partial class BuilderScene : Node3D
 	/// detached, the freecam takes the view back, and the authored world is restored from the
 	/// snapshot taken on entry — physics results, script edits, session spawns and table changes all
 	/// stay in the session, so the lot is exactly as the creator left it before pressing Test.
+	///
+	/// The lot's scripts are deliberately NOT run again here: the authored script spawns are the ones
+	/// parked at entry and put back by the restore, so stopping is a revert rather than a second load.
 	/// </summary>
 	public void ExitTestMode()
 	{
@@ -617,15 +692,28 @@ public partial class BuilderScene : Node3D
 		if (PlayerCamera != null) PlayerCamera.Current = false;
 		Freecam.Current = true;
 
-		// Constraints first: the joints reference the bodies this session swapped in, and the
-		// runtime restart below destroys (and re-creates) script-owned parts.
+		// Constraints first: the joints reference the bodies this session swapped in, and they must be
+		// gone before the parts they hold are detached or freed by the restore.
 		TeardownConstraints();
-		StartScriptRuntime();
 
-		// Last, so the reload's script-owned spawns are already in place to be recognised and kept.
+		// The session's script runtime ends with the session, and the lot's scripts are NOT run again
+		// here: stopping a test must undo the session, not re-apply the scripts' load-time effects.
+		// What the session's reload would otherwise have to re-create — the authored script spawns —
+		// was parked out of the tree at entry and comes back below. (Stopping does not remove the
+		// session's own spawns; the restore's entity-set pass does, which is the same pass that drops
+		// anything else the session created.)
+		StopScriptRuntime();
+
+		// Last, so the restore sees the authored world: the parked spawns go back into the tree
+		// first (their snapshot entries are live nodes, so this is what makes the state pass land on
+		// them), then every recorded value is re-applied and the session's spawns are removed.
 		LotSessionSnapshot snapshot = _sessionSnapshot;
 		_sessionSnapshot = null;
-		if (snapshot != null) snapshot.Restore(this);
+		if (snapshot != null)
+		{
+			snapshot.ReattachScriptSpawns(DestroyEntity);
+			snapshot.Restore(this);
+		}
 	}
 
 	/// <summary>
@@ -728,7 +816,47 @@ public partial class BuilderScene : Node3D
 		Events.Enqueue(subject, eventName, other, fromPlayer, playerId);
 	}
 
-	/// <summary>The entity handle a physics body belongs to: the player's invisible body resolves
+	/// <summary>
+	/// Queues one <c>clicked</c> delivery for a lot UI element a player activated (milestone 5.3).
+	/// Player-originated by construction — it is a press — so the local peer id is the player, and
+	/// the character's handle names the toucher when one exists. Session-gated like every other
+	/// event source; the delivery itself is a normal queue entry (coalesced, capped, cleaned up).
+	/// </summary>
+	internal void EnqueueUiClick(int subject)
+	{
+		if (Events == null || !InTestMode) return;
+		if (subject < 0) return;
+		int other = Player != null && Player.Character != null ? HandleOf(Player.Character) : -1;
+		int playerId = 1;
+		LuaNetBridge bridge = LuaManager.Instance.NetBridge;
+		if (bridge != null && bridge.Router != null) playerId = bridge.Router.LocalPeerId;
+		Events.Enqueue(subject, "clicked", other, true, playerId);
+	}
+
+	/// <summary>
+	/// Gives every lot UI element a handle before a session's scripts load (milestone 5.3, design
+	/// doc D8): a script can only <c>Subscribe</c> to an element it can address, and an
+	/// editor-placed element carries a handle only once a registration path touches it (§3.2
+	/// option A) — assigned at load for everything present then, so this covers what was placed
+	/// afterwards. Mirrors the query volume rule (§3.13 D8).
+	/// </summary>
+	private void EnsureUiElementHandles()
+	{
+		EnsureUiHandlesUnder(LotUIRoot);
+	}
+
+	private void EnsureUiHandlesUnder(Node parent)
+	{
+		if (parent == null) return;
+		int count = parent.GetChildCount();
+		for (int i = 0; i < count; i++)
+		{
+			Node child = parent.GetChild(i);
+			if (child.HasMeta(LotObject.InternalChildMeta)) continue;
+			if (child is LotUIElement) EnsureEntityHandle(child);
+			EnsureUiHandlesUnder(child);
+		}
+	}
 	/// to the session's character, a simulated body carries its owner in meta (it lives at the lot
 	/// root, away from its part), and any other body is found by walking up to the nearest node
 	/// with a handle — which is what collapses internal collision bodies onto the part that owns
@@ -827,6 +955,8 @@ public partial class BuilderScene : Node3D
 		PlayerCamera.SetMeta(LotObject.InternalChildMeta, true);
 		LotViewport.AddChild(PlayerCamera);
 		if (_cameraInput != null) PlayerCamera.Bind(_cameraInput);
+		// A camera created after the setting was changed still boots with it (§5.4).
+		ApplyCameraSettings();
 	}
 
 #if DEBUG
@@ -856,6 +986,9 @@ public partial class BuilderScene : Node3D
 		{
 			GizmoSelfTest.RunPhysicsPick(this, _physicsSmokeProbe);
 			GizmoSelfTest.RunPhysicsDrag(this, _physicsSmokeMover, _physicsSmokeMoverShape, _physicsSmokeDragged, _physicsSmokeBlocker, _physicsSmokeCeiling);
+			// The multi-object gizmo's group math: a scratch root inside the tree (a detached node
+			// has no global transform, and the group's math is world-space).
+			GizmoSelfTest.RunSelectionGroup(this);
 
 			_physicsSmokeProbe.QueueFree();
 			_physicsSmokeDragged.QueueFree();
@@ -943,6 +1076,9 @@ public partial class BuilderScene : Node3D
 		// (the physics world is queryable outside the physics step — §3.11's pinned rule); the
 		// deliveries wait for ScriptRuntime.Tick's drain like every other event.
 		if (InTestMode && QueryVolumes != null) QueryVolumes.Tick();
+		// Milestone 5.3: whatever the overlay's interactive pass reported during its draw becomes
+		// a queued `clicked` delivery for this frame's ScriptRuntime.Tick to drain.
+		if (UiInput != null) UiInput.Flush();
 #if DEBUG
 		// The net integration suite deliberately waits a few physics frames: its OOM churn and
 		// ~5M-instruction script loads would otherwise slow the startup frame enough to change the
@@ -963,6 +1099,14 @@ public partial class BuilderScene : Node3D
 		// The constraint suite (milestone 3.6) runs after the editor suite: it registers a scratch
 		// Float property, and running last keeps that from shifting the property counts the _Ready
 		// suites assert.
+		// The selection-outline suite needs Builder.Instance too, and it adds (and frees) temporary
+		// parts on the live lot, so it runs right after the editor workflow suite and before the
+		// session-driving ones.
+		if (!_outlineSuiteDone && Engine.GetPhysicsFrames() >= IntegrationSuitePhysicsDelay)
+		{
+			_outlineSuiteDone = true;
+			SelectionOutlineSelfTest.Run(this);
+		}
 		if (!_constraintSuiteDone && Engine.GetPhysicsFrames() >= IntegrationSuitePhysicsDelay)
 		{
 			_constraintSuiteDone = true;
@@ -1040,8 +1184,59 @@ public partial class BuilderScene : Node3D
 #endif
 	}
 
+	/// <summary>
+	/// Pushes §5.4's camera settings onto the two cameras. Both read the same value (one global set —
+	/// the freecam's and the player camera's sensitivity were the same 0.15 before this milestone).
+	/// Invert-Y is not applied here: it flips the shared look delta at hand-off (ViewportWindow), so
+	/// one flip covers both cameras.
+	/// </summary>
+	private void ApplyCameraSettings()
+	{
+		CameraSettings settings = CameraSettingsService.Current;
+
+		if (Freecam != null && GodotObject.IsInstanceValid(Freecam))
+		{
+			Freecam.Fov = settings.Fov;
+			Freecam.LookSensitivity = settings.LookSensitivity;
+		}
+		if (PlayerCamera != null && GodotObject.IsInstanceValid(PlayerCamera))
+		{
+			PlayerCamera.Fov = settings.Fov;
+			PlayerCamera.LookSensitivity = settings.LookSensitivity;
+			PlayerCamera.ZoomStep = settings.ZoomStep;
+			PlayerCamera.BlendStart = settings.ZoomBlendStart;
+		}
+	}
+
+	/// <summary>
+	/// Pushes §5.4's graphics settings onto the lot viewport. The viewport's SIZE is owned by
+	/// ViewportWindow (the render target follows the displayed rect), so resolution scale is applied
+	/// through Godot's 3D scaling — a fraction of the display resolution, upscaled — which is the
+	/// only honest place to change render resolution. The defaults (scale 1, MSAA off, shadows on)
+	/// are exactly the pre-milestone state, so an untouched install is unchanged.
+	/// </summary>
+	private void ApplyGraphicsSettings()
+	{
+		GraphicsSettings settings = GraphicsSettingsService.Current;
+
+		if (LotViewport != null && GodotObject.IsInstanceValid(LotViewport))
+		{
+			LotViewport.Scaling3DScale = settings.RenderScale;
+			LotViewport.Msaa3D = (Viewport.Msaa)settings.Msaa;
+		}
+		if (_sun != null && GodotObject.IsInstanceValid(_sun))
+		{
+			_sun.ShadowEnabled = settings.Shadows;
+		}
+	}
+
 	public override void _ExitTree()
 	{
+		CameraSettingsService.Changed -= ApplyCameraSettings;
+		GraphicsSettingsService.Changed -= ApplyGraphicsSettings;
+		// A key-rebind capture must not survive this scene, or it would swallow the next key press
+		// wherever the client goes next (§5.5).
+		KeyBindingService.CancelCapture();
 		// Script layer first (drops its bookkeeping), then the VM: object handles die with the lot
 		// scene, so the Lua state dies with it too — a fresh state per session instead of a stale
 		// singleton holding dead handles.
@@ -1383,16 +1578,51 @@ public partial class BuilderScene : Node3D
 	}
 
 	/// <summary>
-	/// Editor delete (milestone 2.4). The command detaches the node instead of freeing it, so undo
-	/// restores the same node into the same slot; the node is freed only if the entry is dropped
-	/// while the deletion is still in effect.
+	/// Editor delete (milestone 2.4): every node in <paramref name="nodes"/> goes in ONE history
+	/// entry, so deleting a multi-selection is a single Ctrl+Z. A node inside another candidate's
+	/// subtree is dropped (the ancestor's detach already takes it), as are internal children, freed
+	/// nodes and nodes with no parent. The command detaches rather than frees, so undo restores the
+	/// same nodes into the same slots — the Delete key and the hierarchy's context menu both route
+	/// here, which is why a multi-item delete can no longer act on one item.
 	/// </summary>
-	public void DeleteNode(Node target)
+	public void DeleteNodes(IReadOnlyList<Node> nodes)
 	{
-		if (target == null || !GodotObject.IsInstanceValid(target)) return;
-		Node parent = target.GetParent();
-		if (parent == null) return;
-		Builder.Instance.History.Push(new DeleteNodeCommand(target, parent, target.GetIndex()));
+		if (nodes == null || nodes.Count == 0) return;
+		Builder builder = Builder.Instance;
+		if (builder == null) return;
+
+		_deleteScratch.Clear();
+		for (int i = 0; i < nodes.Count; i++)
+		{
+			Node node = nodes[i];
+			if (node == null || !GodotObject.IsInstanceValid(node)) continue;
+			if (node.HasMeta(LotObject.InternalChildMeta)) continue;
+			if (node.GetParent() == null) continue;
+			if (_deleteScratch.Contains(node)) continue;
+			_deleteScratch.Add(node);
+		}
+		for (int i = _deleteScratch.Count - 1; i >= 0; i--)
+		{
+			if (HasCandidateAncestor(_deleteScratch[i])) _deleteScratch.RemoveAt(i);
+		}
+		if (_deleteScratch.Count == 0) return;
+
+		// The command copies the set into its own lists, so the scratch list is free to be reused.
+		builder.History.Push(new DeleteNodesCommand(_deleteScratch));
+	}
+
+	/// <summary>True when an ancestor of <paramref name="node"/> is one of the pending delete
+	/// candidates — such a node needs no entry of its own, and its recorded index would be
+	/// meaningless once the ancestor is detached.</summary>
+	private bool HasCandidateAncestor(Node node)
+	{
+		Node parent = node.GetParent();
+		while (parent != null)
+		{
+			if (_deleteScratch.Contains(parent)) return true;
+			parent = parent.GetParent();
+		}
+		return false;
 	}
 
 	/// <summary>

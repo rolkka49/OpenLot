@@ -28,6 +28,11 @@ public class ViewportWindow : ICameraInputSource
 	private Vector2 _lastDragDelta;
 	private bool _looking;
 
+	// Milestone 5.3: elements the session overlay's interactive pass activated this frame, reused
+	// so a frame with presses allocates nothing.
+	private readonly System.Collections.Generic.List<LotUIElement> _uiActivations =
+		new System.Collections.Generic.List<LotUIElement>();
+
 	/// <summary>Set by Builder every layout pass: false while a pause/confirm modal owns input.</summary>
 	public bool InputEnabled { get; set; } = true;
 
@@ -152,9 +157,10 @@ public class ViewportWindow : ICameraInputSource
 			// Player session (§3.4): no editor tooling. The camera handoff has already moved look
 			// input to the player camera; the gizmo, part dragging and selection clicks stay off so
 			// nothing competes with the player. The lot's own UI overlay still draws — it belongs to
-			// the lot, not to the editor.
+			// the lot, not to the editor — and in a session it is INTERACTIVE (milestone 5.3):
+			// presses are resolved through ImGui item state and reported to the scene's input router.
 			builder.Gizmo.Suspend();
-			LotUiRenderer.DrawAll(_scene.LotUIRoot, _imageOrigin, _imageSize, builder.Selection);
+			DrawSessionOverlay(builder);
 		}
 		else if (builder.Mode == BuilderMode.UI)
 		{
@@ -194,7 +200,12 @@ public class ViewportWindow : ICameraInputSource
 		// Resolve the layout-time conditions once, for both cameras: exactly one of these can be
 		// true, and only the Current camera consumes the delta handed out by TakeLookDelta().
 		bool editorActive, playerActive;
-		ResolveCameraAuthority(InputEnabled, ImGui.IsWindowFocused(), _scene.InTestMode, out editorActive, out playerActive);
+		// RootAndChildWindows, not the default: the session's lot UI overlay is a child window of
+		// this one (milestone 5.3), and clicking a UI element focuses that child — plain
+		// IsWindowFocused() would then report the viewport unfocused and hand camera control away.
+		// With no child (build mode) the answer is exactly the old one.
+		ResolveCameraAuthority(InputEnabled, ImGui.IsWindowFocused(ImGui.FocusedRootAndChildWindows),
+			_scene.InTestMode, out editorActive, out playerActive);
 		EditorCameraActive = editorActive;
 		PlayerCameraActive = playerActive;
 
@@ -203,6 +214,35 @@ public class ViewportWindow : ICameraInputSource
 			ImGui.DrawText(_imageOrigin + new Vector2(8f, 6f), new Color(1f, 1f, 1f, 0.85f), builder.LotName);
 
 		ImGui.End();
+	}
+
+	/// <summary>
+	/// The lot UI overlay during a player session (milestone 5.3). It is drawn inside a borderless,
+	/// non-scrolling ImGui child window covering the picture frame, so the interactive items the
+	/// renderer submits (an InvisibleButton per interactive element) cannot grow the Viewport
+	/// window's content or start a window-move drag — and so their layout stays contained. Every
+	/// activated element is handed to the scene's input router, which queues its `clicked`.
+	/// </summary>
+	private void DrawSessionOverlay(Builder builder)
+	{
+		SessionInputRouter router = _scene.UiInput;
+		if (router == null)
+		{
+			LotUiRenderer.DrawAll(_scene.LotUIRoot, _imageOrigin, _imageSize, builder.Selection);
+			return;
+		}
+
+		ImGui.SetCursorScreenPos(_imageOrigin);
+		if (ImGui.BeginChild("##lotui_session", _imageSize.X, _imageSize.Y, false,
+			ImGui.WindowNoBackground | ImGui.WindowNoScrollbar))
+		{
+			LotUiRenderer.DrawSession(_scene.LotUIRoot, _imageOrigin, _imageSize, builder.Selection,
+				_uiActivations);
+			for (int i = 0; i < _uiActivations.Count; i++) router.Report(_uiActivations[i]);
+			_uiActivations.Clear();
+		}
+		// EndChild() is unconditional, exactly like Begin()/End().
+		ImGui.EndChild();
 	}
 
 	/// <summary>
@@ -257,7 +297,11 @@ public class ViewportWindow : ICameraInputSource
 	{
 		// Only a right-press that starts over the viewport begins a look drag (Unity parity);
 		// once started it keeps tracking until release, even with the cursor outside the window.
-		if (ImGui.IsMouseClicked(ImGui.MouseButtonRight) && ImGui.IsWindowHovered())
+		// ChildWindows is included because the session's lot UI overlay draws into a borderless
+		// child window covering the picture (milestone 5.3) — without it, right-drag look would
+		// stop working whenever the cursor was over that child. In build mode there is no child,
+		// so this is exactly the old test.
+		if (ImGui.IsMouseClicked(ImGui.MouseButtonRight) && ImGui.IsWindowHovered(ImGui.HoveredChildWindows))
 		{
 			_looking = true;
 			_lastDragDelta = Vector2.Zero;
@@ -285,6 +329,10 @@ public class ViewportWindow : ICameraInputSource
 	{
 		Vector2 delta = _pendingLookDelta;
 		_pendingLookDelta = Vector2.Zero;
+		// Invert-Y is a shared camera setting (§5.4): the freecam and the player camera both read
+		// this one route, so a single flip inverts look for both. Applied at hand-off so the stored
+		// delta stays the raw pointer motion.
+		if (CameraSettingsService.Current.InvertY) delta.Y = -delta.Y;
 		return delta;
 	}
 

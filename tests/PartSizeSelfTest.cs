@@ -107,15 +107,17 @@ public static class PartSizeSelfTest
 
 	// --- SetSize -----------------------------------------------------------------------------
 
-	/// <summary>The resize contract per kind: mesh, hull, outline, and the node scale it must
-	/// never touch.</summary>
+	/// <summary>The resize contract per kind: mesh, collision hull, and the node scale it must
+	/// never touch. The selection highlight is not part of it any more — that is a screen-space
+	/// outline built from the part's state (SelectionOutline), not a mesh child — so the checks
+	/// below pin that no hull is regenerated behind the part's back.</summary>
 	private static void TestSetSize()
 	{
 		LotObject cube = LotObject.Create(LotObjectKind.Cube, "Box", new Color(1f, 1f, 1f));
 		try
 		{
-			MeshInstance3D outline = cube.GetNodeOrNull<MeshInstance3D>("Outline");
-			Check("size: the cube has an outline hull to keep in step", outline != null);
+			Check("size: a part carries no outline hull to keep in step",
+				cube.GetNodeOrNull<MeshInstance3D>("Outline") == null);
 
 			Check("size: SetSize succeeds on a cube", cube.SetSize(new Vector3(4f, 1f, 2f)));
 			Check("size: the size reads back", Near(cube.Size, new Vector3(4f, 1f, 2f)));
@@ -124,8 +126,8 @@ public static class PartSizeSelfTest
 			Check("size: the box hull carries the size natively",
 				cube.CollisionShape.Shape is BoxShape3D box && Near(box.Size, new Vector3(4f, 1f, 2f))
 				&& Near(cube.CollisionBody.Scale, Vector3.One));
-			Check("size: the outline swaps to the same new mesh",
-				outline != null && outline.Mesh == cube.MeshInstance.Mesh);
+			Check("size: the outline state still tracks the part after a resize",
+				cube.HasOutlineSilhouette && cube.OutlineState == LotOutlineState.None);
 			Check("size: the node scale was not touched", Near(cube.Scale, Vector3.One));
 
 			// A legacy node scale (a script SetScale from before the migration) is a plain

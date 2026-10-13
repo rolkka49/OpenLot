@@ -1,10 +1,26 @@
+using System.Collections.Generic;
 using Godot;
 
 /// <summary>
 /// Lua code editor window, ported from Unity's LuaCodeEditor + CodeEditorWindow and rebuilt on
-/// ImGui's InputTextMultiline, so cursor, selection, undo and clipboard come for free instead of
-/// the hand-rolled TMP editor. Saves on deactivate, window close, and a short debounce
-/// (Tick from Builder._Process) instead of per keystroke.
+/// ImGui's InputTextMultiline, so cursor, selection, in-widget undo and in-app clipboard come for
+/// free instead of the hand-rolled TMP editor. Saves on deactivate, window close, and a short
+/// debounce (Tick from Builder._Process) instead of per keystroke.
+///
+/// The OS clipboard is bridged here, the way the terminal's console does it (the vendored ImGui
+/// addon exposes no clipboard API at all — it only ever uses ImGui's *in-process* clipboard, which
+/// never touches the OS, so nothing could be copied out of OpenLot or pasted into it):
+/// <list type="bullet">
+/// <item><b>Ctrl+V</b> reads the OS clipboard and types it into the focused field as synthesized
+/// keystrokes, so it lands at the caret and rides ImGui's own undo (the console's Ctrl+V inserts at
+/// its cursor the same way).</item>
+/// <item><b>Ctrl+C / Ctrl+Shift+C</b> put the buffer on the OS clipboard — the console's
+/// Ctrl+Shift+C "copy everything" binding, because the ImGui wrapper exposes no text-selection
+/// query to read a partial selection from.</item>
+/// <item><b>Ctrl+X</b> is the same copy followed by a cut.</item>
+/// </list>
+/// Builder._Input routes the three shortcuts (see there for why the press is visible at all).
+///
 /// Syntax highlighting is deferred: OpenLot plans an ImGui modification that can color text
 /// ranges — GetDisplayCode() is the single hook that modification replaces, leaving the rest of
 /// this file untouched.
@@ -13,6 +29,23 @@ public class CodeEditorWindow : IEditorWindow
 {
 	private const int BufferCapacity = 262144;
 	private const double SaveDebounceSeconds = 1.2;
+
+	/// <summary>What a Ctrl/Meta keystroke asks the editor's clipboard bridge to do.</summary>
+	public enum ClipboardAction
+	{
+		None,
+		Paste,
+		Copy,
+		Cut
+	}
+
+	/// <summary>One synthesized keystroke: the key to press and release, plus the character it types
+	/// (0 for a key with no character, such as Enter or Backspace).</summary>
+	public struct Keystroke
+	{
+		public Key Key;
+		public long Unicode;
+	}
 
 	private readonly Builder _builder;
 
@@ -44,6 +77,11 @@ public class CodeEditorWindow : IEditorWindow
 	// Transient Run status shown in the header (set by the Run button).
 	private string _runStatus = "";
 	private double _runStatusUntil = -1.0;
+
+	// Clipboard bridge (see the class summary): text waiting to be typed into the field, and the
+	// "clear the field" half a cut needs beyond its copy. Both are consumed by Tick.
+	private string _pendingPaste;
+	private bool _pendingClearAll;
 
 	public bool IsOpen { get; private set; }
 
@@ -85,9 +123,12 @@ public class CodeEditorWindow : IEditorWindow
 		HasCodeFocus = false;
 	}
 
-	/// <summary>Called from Builder._Process — debounced save for active edits.</summary>
+	/// <summary>Called from Builder._Process — debounced save for active edits, and the OS
+	/// clipboard bridge's keystroke injection (which must not run inside the input callback that
+	/// queued it).</summary>
 	public void Tick(double delta)
 	{
+		InjectPendingClipboard();
 		if (!_dirtySinceSave || _activePath.Length == 0) return;
 		_idleSinceEdit += delta;
 		if (_idleSinceEdit >= SaveDebounceSeconds)
@@ -114,6 +155,145 @@ public class CodeEditorWindow : IEditorWindow
 		if (!_dirtySinceSave || _activePath.Length == 0) return;
 		_builder.Scripts.SaveScript(_activePath, _code);
 		_dirtySinceSave = false;
+	}
+
+	// --- OS clipboard bridge (see the class summary) ---------------------------------------------
+	//
+	// The vendored addon has no clipboard API: ImGui's Ctrl+C/Ctrl+V only ever touch ImGui's own
+	// in-process clipboard, so nothing leaves or enters OpenLot. These four members are the bridge.
+	// They are deliberately split into pure rules (mapping a key to an action, turning text into
+	// keystrokes) and thin I/O, so the rules are pinned by EditorWorkflowSelfTest without a frame.
+
+	/// <summary>
+	/// The clipboard action a key press asks for, or <see cref="ClipboardAction.None"/>. Pure, so
+	/// Builder's input handler and the self-test share one rule. Ctrl and Meta (Cmd) both count, and
+	/// key echoes are ignored so a held key does not repeat the action. Ctrl+Shift+C resolves to the
+	/// same copy as Ctrl+C — the console's "copy everything" binding, kept working here too.
+	/// </summary>
+	public static ClipboardAction ResolveClipboardAction(InputEventKey key)
+	{
+		if (key == null || !key.Pressed || key.Echo) return ClipboardAction.None;
+		if (!key.CtrlPressed && !key.MetaPressed) return ClipboardAction.None;
+		switch (key.Keycode)
+		{
+			case Key.V: return ClipboardAction.Paste;
+			case Key.C: return ClipboardAction.Copy;
+			case Key.X: return ClipboardAction.Cut;
+			default: return ClipboardAction.None;
+		}
+	}
+
+	/// <summary>
+	/// Clipboard text as the field should receive it: CR is dropped and CRLF collapsed (ImGui wants
+	/// plain newlines), and the length is capped at the field's capacity so an absurd paste cannot
+	/// exceed the buffer. Pure.
+	/// </summary>
+	public static string NormalizeClipboardText(string text)
+	{
+		if (string.IsNullOrEmpty(text)) return "";
+		string clean = text.IndexOf('\r') >= 0 ? text.Replace("\r\n", "\n").Replace('\r', '\n') : text;
+		if (clean.Length > BufferCapacity) clean = clean.Substring(0, BufferCapacity);
+		return clean;
+	}
+
+	/// <summary>
+	/// The keystrokes that type <paramref name="text"/> into the field: a character key per
+	/// printable character, and an Enter key per newline (ImGui filters control characters out of
+	/// the character stream, so a newline has to arrive as its key). Pasted text is otherwise typed
+	/// exactly as it reads. Pure.
+	/// </summary>
+	public static List<Keystroke> BuildPasteKeystrokes(string text)
+	{
+		List<Keystroke> steps = new List<Keystroke>();
+		if (string.IsNullOrEmpty(text)) return steps;
+		for (int i = 0; i < text.Length; i++)
+		{
+			char c = text[i];
+			if (c == '\n') steps.Add(new Keystroke { Key = Key.Enter, Unicode = 0 });
+			else if (c >= 0x20) steps.Add(new Keystroke { Key = Key.None, Unicode = c });
+		}
+		return steps;
+	}
+
+	/// <summary>Queues the OS clipboard to be typed into the field. Nothing happens for an empty
+	/// clipboard, so a stray Ctrl+V cannot disturb the buffer.</summary>
+	public void PasteFromClipboard()
+	{
+		PasteText(DisplayServer.ClipboardGet());
+	}
+
+	/// <summary>
+	/// Queues text to be typed into the field, as if it had come from the clipboard (the OS read
+	/// above is a thin wrapper over this). Splitting the two is what lets the self-test drive the
+	/// real injection path without depending on what a headless display server's clipboard holds.
+	/// </summary>
+	public void PasteText(string text)
+	{
+		string normalized = NormalizeClipboardText(text);
+		if (normalized.Length == 0) return;
+		_pendingPaste = normalized;
+	}
+
+	/// <summary>Puts the whole buffer on the OS clipboard (the wrapper exposes no selection, so
+	/// copy is all-or-nothing — see the class summary).</summary>
+	public void CopyAllToClipboard()
+	{
+		if (_code.Length == 0) return;
+		DisplayServer.ClipboardSet(_code);
+	}
+
+	/// <summary>Copies the whole buffer to the OS clipboard and clears the field.</summary>
+	public void CutAllToClipboard()
+	{
+		if (_code.Length == 0) return;
+		CopyAllToClipboard();
+		_pendingClearAll = true;
+	}
+
+	/// <summary>Types the queued paste (called from Tick, so the keystrokes are fed outside the
+	/// input callback that queued them).</summary>
+	private void InjectPendingClipboard()
+	{
+		if (_pendingClearAll)
+		{
+			_pendingClearAll = false;
+			// Ctrl+A then Backspace removes everything as one ImGui edit (so it undoes in one step).
+			SendKeystroke(Key.A, 0, true);
+			SendKeystroke(Key.Backspace, 0, false);
+			Input.FlushBufferedEvents();
+		}
+		if (_pendingPaste == null) return;
+		string text = _pendingPaste;
+		_pendingPaste = null;
+		List<Keystroke> steps = BuildPasteKeystrokes(text);
+		for (int i = 0; i < steps.Count; i++) SendKeystroke(steps[i].Key, steps[i].Unicode, false);
+		// ParseInputEvent feeds the buffered input system, so the flush is what makes the typed
+		// characters visible without waiting for the next input flush (the InputSelfTest spike).
+		Input.FlushBufferedEvents();
+	}
+
+	/// <summary>Feeds one synthetic key press and its release to the input system, which the addon
+	/// forwards into ImGui — the field is focused, so it consumes them as typing.</summary>
+	private static void SendKeystroke(Key key, long unicode, bool ctrl)
+	{
+		InputEventKey down = new InputEventKey
+		{
+			Keycode = key,
+			PhysicalKeycode = key,
+			Pressed = true,
+			CtrlPressed = ctrl,
+			Unicode = unicode
+		};
+		Input.ParseInputEvent(down);
+		InputEventKey up = new InputEventKey
+		{
+			Keycode = key,
+			PhysicalKeycode = key,
+			Pressed = false,
+			CtrlPressed = ctrl,
+			Unicode = 0
+		};
+		Input.ParseInputEvent(up);
 	}
 
 	/// <summary>
@@ -232,8 +412,10 @@ public class CodeEditorWindow : IEditorWindow
 		{
 			ImGui.Text(_cachedLineNumbers);
 			ImGui.SetScrollY(_lastEditorScrollY);
-			ImGui.EndChild();
 		}
+		// EndChild() is unconditional: BeginChild() returns false for a clipped/collapsed child
+		// (skips the body, not the pairing ImGui requires).
+		ImGui.EndChild();
 		ImGui.SameLine();
 
 		bool hostOpen = ImGui.BeginChild("##codehost", 0f, 0f);
@@ -260,8 +442,10 @@ public class CodeEditorWindow : IEditorWindow
 			// deactivation is the closest commit point the wrapper can reach.
 			committed = ImGui.IsItemDeactivatedAfterEdit();
 			_lastEditorScrollY = ImGui.GetScrollY();
-			ImGui.EndChild();
 		}
+		// EndChild() is unconditional: BeginChild() returns false for a clipped/collapsed child
+		// (skips the body, not the pairing ImGui requires).
+		ImGui.EndChild();
 
 		if (committed)
 		{

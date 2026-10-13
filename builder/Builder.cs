@@ -23,6 +23,15 @@ public partial class Builder : Node
 {
 	public static Builder Instance { get; private set; }
 
+	/// <summary>
+	/// A lot the terminal asked this scene to open, consumed once at <see cref="_Ready"/>. Set by
+	/// the terminal's lot-list selection and by nothing else: there is no independent player runtime
+	/// yet (§6.1), so the creation environment is the only host, and picking a lot from the list
+	/// means "open it here". Cleared as soon as it is read, so re-entering the builder normally does
+	/// not reload it. The real play/host/join flow into the gameplay scene lands with §6.1/§10.1.
+	/// </summary>
+	public static string PendingLotPath = "";
+
 	public SelectionManager Selection { get; private set; }
 	public ScriptManager Scripts { get; private set; }
 	public BuilderScene Scene { get; private set; }
@@ -83,6 +92,11 @@ public partial class Builder : Node
 	private bool _secretWarningRequested = false;
 	/// <summary>Sampled in the layout pass so input can be gated on the caution modal.</summary>
 	private bool _secretWarningOpen = false;
+
+	/// <summary>The shared client settings window (§5.4) — note this is NOT a modal: it is a plain
+	/// window so the creator can keep seeing the scene change behind it (the theme preview only means
+	/// something if the lot is visible). Opened from the View menu or the pause menu.</summary>
+	private bool _settingsOpen = false;
 
 	/// <summary>Archive path this lot was last saved to or loaded from, or "" for a lot that has never
 	/// been committed to a file (§4.2). Save Lot writes here; Save Lot As… and Open Lot… replace it.</summary>
@@ -168,6 +182,20 @@ public partial class Builder : Node
 		// already did them.
 		DisplaySetup.NormalizeStretch();
 		WallpaperService.LoadPersistedSettings();
+		// Remembered fonts (milestone 5.4), restored the same idempotent way: whichever scene boots
+		// first owns the scan, and the other's call is a no-op. Font handles are created here because
+		// adding one rebuilds the ImGui atlas, which may only happen during setup.
+		FontService.LoadPersistedSettings();
+		// Remembered theme (milestone 5.4): the shared palette + window shape, restored the same
+		// idempotent way so whichever scene boots first owns it.
+		ThemeService.LoadPersistedSettings();
+		// Remembered camera and graphics settings (§5.4): BuilderScene applies them to its cameras
+		// and viewport as it builds (and on every later change).
+		CameraSettingsService.LoadPersistedSettings();
+		GraphicsSettingsService.LoadPersistedSettings();
+		// Remembered key bindings (§5.5). Loading applies them to Godot's InputMap, so a rebind made
+		// in a previous session drives the character before the first frame.
+		KeyBindingService.LoadPersistedSettings();
 		Selection = new SelectionManager();
 		Scripts = new ScriptManager(this);
 		// The history must exist before any panel can push to it (the gizmo, drag controllers and
@@ -204,12 +232,26 @@ public partial class Builder : Node
 		LotAutosave.MarkSessionStart();
 
 		ImGui.OnLayout(DrawLayout);
+
+		// A lot handed over by the terminal's lot list (see PendingLotPath). Loaded through exactly
+		// the pipeline File → Open Lot… uses, after every collaborator above exists. Note the crash
+		// snapshot prompt is untouched by this: a pending lot is an explicit choice, but declining
+		// the prompt keeps the loaded lot, so neither path can silently discard the other's work.
+		if (!string.IsNullOrEmpty(PendingLotPath))
+		{
+			string pending = PendingLotPath;
+			PendingLotPath = "";
+			LoadLotIntoBuilder(pending, false);
+		}
 	}
 
 	public override void _Process(double delta)
 	{
 		// Debounced script saving runs outside the ImGui layout (delta time from the engine).
 		_codeEditor.Tick(delta);
+		// A font chosen from the terminal's settings window (or by `theme font`) is applied here,
+		// outside the layout pass — see FontService for why it cannot be applied where it is chosen.
+		FontService.Tick();
 		// Periodic snapshot (milestone 4.1): rides the same save pipeline a manual save uses, and is
 		// skipped while a player session owns the world.
 		LotAutosave.Tick(delta, Scene, LotName, HasUnsavedChanges, InTestMode);
@@ -255,26 +297,99 @@ public partial class Builder : Node
 		if (Instance == this) Instance = null;
 	}
 
+	/// <summary>
+	/// Editor delete of the whole selection: one history entry for the set (milestone 2.4), so a
+	/// multi-item delete is a single Ctrl+Z. The Delete key and the hierarchy's context menu both
+	/// route through here — a delete can no longer act on one item while several are selected.
+	/// Nothing happens with no selection, outside a scene, or inside a player session.
+	/// </summary>
+	public void DeleteSelection()
+	{
+		if (InTestMode || Selection == null || Scene == null || Selection.Count == 0) return;
+		_deleteSelectionScratch.Clear();
+		Selection.CopySelection(_deleteSelectionScratch);
+		Scene.DeleteNodes(_deleteSelectionScratch);
+	}
+
+	/// <summary>Reused by <see cref="DeleteSelection"/> (no per-call list allocation).</summary>
+	private readonly System.Collections.Generic.List<Node> _deleteSelectionScratch =
+		new System.Collections.Generic.List<Node>();
+
+	/// <summary>
+	/// The code editor's OS clipboard shortcuts (Ctrl+C / Ctrl+X / Ctrl+V). Deliberately
+	/// <c>_Input</c> rather than <c>_UnhandledInput</c>: while the code field has focus the ImGui
+	/// addon CONSUMES every key event (it reports <c>WantCaptureKeyboard</c> and calls
+	/// <c>set_input_as_handled</c>), so an unhandled-input handler would never see the shortcut at
+	/// all. Godot calls <c>_Input</c> on the scene's nodes before the addon's autoload node (input
+	/// goes out in reverse tree order), so this is the one point where the press is still visible —
+	/// and marking it handled here is also what stops ImGui from acting on it a second time with
+	/// its own in-process clipboard.
+	/// </summary>
+	public override void _Input(InputEvent @event)
+	{
+		// The key-rebind capture (§5.5) sees the press before ImGui consumes it — the same seam and
+		// the same reason as the clipboard bridge below: while a text field has focus the addon marks
+		// every key event handled, and this is the one point where it is still visible.
+		if (KeyBindingService.Capturing && @event is InputEventKey captureKey && captureKey.Pressed)
+		{
+			if (captureKey.Keycode == Key.Escape)
+			{
+				// Escape cancels the capture (it is deliberately not a rebindable chord).
+				KeyBindingService.CancelCapture();
+			}
+			else if (KeyBindingService.TryCapture(captureKey, out bool captured, out string captureMessage))
+			{
+				if (captureMessage.Length > 0) ReportSetting(!captured, captureMessage);
+			}
+			Viewport captureViewport = GetViewport();
+			if (captureViewport != null) captureViewport.SetInputAsHandled();
+			return;
+		}
+
+		if (_codeEditor == null || !_codeEditor.HasCodeFocus) return;
+		CodeEditorWindow.ClipboardAction action = CodeEditorWindow.ResolveClipboardAction(@event as InputEventKey);
+		if (action == CodeEditorWindow.ClipboardAction.None) return;
+
+		if (action == CodeEditorWindow.ClipboardAction.Paste) _codeEditor.PasteFromClipboard();
+		else if (action == CodeEditorWindow.ClipboardAction.Copy) _codeEditor.CopyAllToClipboard();
+		else _codeEditor.CutAllToClipboard();
+
+		Viewport viewport = GetViewport();
+		if (viewport != null) viewport.SetInputAsHandled();
+	}
+
 	public override void _UnhandledInput(InputEvent @event)
 	{
 		InputEventKey keyEvent = @event as InputEventKey;
 		if (keyEvent == null || !keyEvent.Pressed || keyEvent.Echo) return;
 
-		// Undo/redo (milestone 2.4). While the code editor's text field has focus, Ctrl+Z belongs
-		// to ImGui's own in-widget undo, so the lot stack deliberately stays out of the way.
-		bool ctrl = Input.IsPhysicalKeyPressed(Key.Ctrl) || Input.IsPhysicalKeyPressed(Key.Meta);
-		if (ctrl && keyEvent.Keycode == Key.S && !InTestMode)
+		// Editor shortcuts (§5.5): ONE resolver for the hardware rule, so a rebind moves the menu, the
+		// key and the behaviour together. The gating is unchanged from before: Ctrl+S never saves from
+		// inside a player session, and undo/remove stay out of the code editor's text field (there the
+		// key is text editing and ImGui consumes it anyway).
+		string editorCommand = KeyBindingService.ResolveEditorCommand(keyEvent);
+		if (editorCommand == KeyBindingIds.Save && !InTestMode)
 		{
-			// Ctrl+S follows the File menu's rule: it saves, but never from inside a player session.
 			SaveLot(false);
 			return;
 		}
-		if (ctrl && History != null && !_codeEditor.HasCodeFocus)
+		if (editorCommand == KeyBindingIds.Undo && History != null && !_codeEditor.HasCodeFocus)
 		{
-			bool shift = Input.IsPhysicalKeyPressed(Key.Shift);
-			if (keyEvent.Keycode == Key.Z && shift) { History.Redo(); return; }
-			if (keyEvent.Keycode == Key.Z) { History.Undo(); return; }
-			if (keyEvent.Keycode == Key.Y) { History.Redo(); return; }
+			History.Undo();
+			return;
+		}
+		if (editorCommand == KeyBindingIds.Redo && History != null && !_codeEditor.HasCodeFocus)
+		{
+			History.Redo();
+			return;
+		}
+		// Delete removes the whole selection as ONE history entry (the same path the hierarchy's
+		// context menu uses), gated off the code editor's focus and off a player session, where the
+		// keyboard belongs to the player.
+		if (editorCommand == KeyBindingIds.Delete && !InTestMode && !_codeEditor.HasCodeFocus)
+		{
+			DeleteSelection();
+			return;
 		}
 
 		// A player session owns Escape: it leaves the session instead of opening the pause modal.
@@ -450,6 +565,14 @@ public partial class Builder : Node
 			return;
 		}
 
+		// One shared font for the whole editor pass (§5.4): pushed after the Game-mode early return
+		// (which draws no ImGui text at all) and popped at the end, so the pair always matches.
+		FontService.Push();
+		// The shared theme's window shape (§5.4), pushed for the whole editor pass and popped at the
+		// end, so the terminal and every builder panel wear the same chrome. The default theme
+		// pushes nothing, so an install that never opens the settings is unchanged.
+		ThemeService.PushChrome();
+
 		// Accepted crash recovery is applied here, before anything walks the scene: the modal that asks for
 		// it is drawn at the *end* of the pass, and replacing the lot there would free nodes the panels had
 		// already read this frame. Running it first means every panel below sees the recovered world.
@@ -500,6 +623,14 @@ public partial class Builder : Node
 		DrawPauseMenu();
 		DrawSecretContentWarning();
 		DrawLotMessage();
+
+		// The shared client settings surface (§5.4), opened from the View menu or the pause menu.
+		// Drawn last so it sits above the panels; the default theme pushes no chrome, so an install
+		// that never opens it is unchanged.
+		if (_settingsOpen && !SettingsWindow.Draw(ReportSetting)) _settingsOpen = false;
+
+		FontService.Pop();
+		ThemeService.PopChrome();
 	}
 
 	private void DrawMainMenuBar()
@@ -511,7 +642,7 @@ public partial class Builder : Node
 			// Saving or loading the whole lot is not meaningful while a player session owns the world:
 			// scripts are driving it and it is mid-run (§3.4). The same rule autosave follows.
 			bool lotFileEnabled = !InTestMode && Scene != null;
-			if (ImGui.MenuItem("Save Lot", "Ctrl+S", false, lotFileEnabled))
+			if (ImGui.MenuItem("Save Lot", KeyBindingService.ChordLabel(KeyBindingIds.Save), false, lotFileEnabled))
 				SaveLot(false);
 			if (ImGui.MenuItem("Save Lot As...", "", false, lotFileEnabled))
 				SaveLot(true);
@@ -524,11 +655,12 @@ public partial class Builder : Node
 		}
 		if (ImGui.BeginMenu("Edit"))
 		{
-			// Undo/redo (milestone 2.4). Labels name the command so the menu says what will happen.
+			// Undo/redo (milestone 2.4). Labels name the command and carry its live accelerator, so a
+			// rebound chord is reflected in the menu (§5.5).
 			string undoLabel = History.CanUndo ? "Undo " + History.UndoLabel : "Undo";
-			if (ImGui.MenuItem(undoLabel, "Ctrl+Z", false, History.CanUndo)) History.Undo();
+			if (ImGui.MenuItem(undoLabel, KeyBindingService.ChordLabel(KeyBindingIds.Undo), false, History.CanUndo)) History.Undo();
 			string redoLabel = History.CanRedo ? "Redo " + History.RedoLabel : "Redo";
-			if (ImGui.MenuItem(redoLabel, "Ctrl+Shift+Z", false, History.CanRedo)) History.Redo();
+			if (ImGui.MenuItem(redoLabel, KeyBindingService.ChordLabel(KeyBindingIds.Redo), false, History.CanRedo)) History.Redo();
 			ImGui.Separator();
 			if (ImGui.MenuItem("Clear History", "", false, History.Count > 0)) History.Clear();
 			ImGui.EndMenu();
@@ -577,6 +709,10 @@ public partial class Builder : Node
 				WallpaperService.RequestFileDialog(this);
 			if (ImGui.MenuItem("Clear Wallpaper"))
 				WallpaperService.Clear();
+			// The shared client settings (§5.4): theme, window shape, camera and graphics. Reachable
+			// here while building, and from the pause menu in a session.
+			if (ImGui.MenuItem("Settings..."))
+				_settingsOpen = true;
 			ImGui.Separator();
 			// Secret content (milestone 4.1): a lot's base content is hidden by default. Revealing it is
 			// a deliberate, warned action because those files are shared and not meant to be edited
@@ -653,6 +789,12 @@ public partial class Builder : Node
 
 			if (ImGui.Button("Save Lot", 220f, 0f))
 				SaveLot(false);
+			if (ImGui.Button("Settings...", 220f, 0f))
+			{
+				// The settings window is not a modal, so the pause popup has to step aside for it.
+				ImGui.CloseCurrentPopup();
+				_settingsOpen = true;
+			}
 			if (ImGui.Button("Quit to Terminal", 220f, 0f))
 				RequestQuit();
 			if (ImGui.Button("Resume", 220f, 0f))
@@ -922,6 +1064,14 @@ public partial class Builder : Node
 	/// behind this prompt, so a creator cannot wander into editing shared files by accident; cancelling
 	/// leaves the editor exactly as it was.
 	/// </summary>
+	/// <summary>Sends a settings-window message to the Output panel (§5.4): a failure is a warning,
+	/// a success an info line — the builder's own log surface, next to the terminal's scrollback.</summary>
+	private void ReportSetting(bool isError, string message)
+	{
+		if (isError) LotLog.Warn("settings", message);
+		else LotLog.Info("settings", message);
+	}
+
 	private void DrawSecretContentWarning()
 	{
 		_secretWarningOpen = ImGui.IsPopupOpen("Secret Content Warning");

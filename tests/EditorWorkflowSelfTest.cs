@@ -12,7 +12,7 @@ using Godot;
 /// running it leaves the live lot and the real undo stack untouched (the two end-to-end checks that
 /// must use the real Builder.History clear it again afterwards).
 /// </summary>
-public static class EditorWorkflowSelfTest
+public static partial class EditorWorkflowSelfTest
 {
 	private static int _checks;
 	private static int _failures;
@@ -37,10 +37,13 @@ public static class EditorWorkflowSelfTest
 		TestNodeLifetime(builder, scratch);
 		TestMove(builder, scratch);
 		TestTransform(builder, scratch);
+		TestGroupTransform(builder, scratch);
 		TestProperty(builder, scratch);
 		TestScriptEdit(builder, scene, scratch);
 		TestDropRules(scene, scratch);
 		TestEditorWindows(builder);
+		TestCodeEditorClipboard();
+		TestPasteDelivery(scene);
 
 		scratch.QueueFree();
 		GD.Print("[EditorWorkflowSelfTest] " + _checks + " checks, " + _failures + " failure(s).");
@@ -57,10 +60,110 @@ public static class EditorWorkflowSelfTest
 			&& builder.EditorWindows[1].Title == "Output");
 
 		IEditorWindow output = builder.EditorWindows[1];
+		// The Output panel is open at startup: it is where build-mode diagnostics land, so a
+		// creator should not have to find it in Add Window before a failure means anything.
+		Check("windows: the Output panel starts open", output.IsOpen);
+		output.Close(); // from here the Show/Close pair below starts from a known state
 		output.Show();
 		bool opened = output.IsOpen;
 		output.Close();
 		Check("windows: Show/Close drive IsOpen", opened && !output.IsOpen);
+		output.Show(); // leave it as the editor starts, so later draws match a fresh launch
+	}
+
+	// --- Code editor clipboard bridge (pure rules) ---
+
+	private static InputEventKey KeyPress(Key key, bool ctrl, bool meta = false, bool echo = false, bool pressed = true)
+	{
+		return new InputEventKey { Keycode = key, Pressed = pressed, CtrlPressed = ctrl, MetaPressed = meta, Echo = echo };
+	}
+
+	private static void TestCodeEditorClipboard()
+	{
+		Check("editor clipboard: Ctrl+V asks to paste",
+			CodeEditorWindow.ResolveClipboardAction(KeyPress(Key.V, true)) == CodeEditorWindow.ClipboardAction.Paste);
+		Check("editor clipboard: Ctrl+C asks to copy",
+			CodeEditorWindow.ResolveClipboardAction(KeyPress(Key.C, true)) == CodeEditorWindow.ClipboardAction.Copy);
+		Check("editor clipboard: Ctrl+X asks to cut",
+			CodeEditorWindow.ResolveClipboardAction(KeyPress(Key.X, true)) == CodeEditorWindow.ClipboardAction.Cut);
+		Check("editor clipboard: Ctrl+Shift+C is the console's copy-everything binding",
+			CodeEditorWindow.ResolveClipboardAction(
+				new InputEventKey { Keycode = Key.C, Pressed = true, CtrlPressed = true, ShiftPressed = true })
+				== CodeEditorWindow.ClipboardAction.Copy);
+		Check("editor clipboard: Cmd (Meta) counts like Ctrl",
+			CodeEditorWindow.ResolveClipboardAction(KeyPress(Key.V, false, true)) == CodeEditorWindow.ClipboardAction.Paste);
+		Check("editor clipboard: the unmodified key does nothing",
+			CodeEditorWindow.ResolveClipboardAction(KeyPress(Key.V, false)) == CodeEditorWindow.ClipboardAction.None);
+		Check("editor clipboard: another Ctrl shortcut is left alone",
+			CodeEditorWindow.ResolveClipboardAction(KeyPress(Key.Z, true)) == CodeEditorWindow.ClipboardAction.None
+			&& CodeEditorWindow.ResolveClipboardAction(KeyPress(Key.S, true)) == CodeEditorWindow.ClipboardAction.None);
+		Check("editor clipboard: a key release does nothing",
+			CodeEditorWindow.ResolveClipboardAction(KeyPress(Key.V, true, false, false, false)) == CodeEditorWindow.ClipboardAction.None);
+		Check("editor clipboard: a key echo does nothing (holding Ctrl+V pastes once)",
+			CodeEditorWindow.ResolveClipboardAction(KeyPress(Key.V, true, false, true)) == CodeEditorWindow.ClipboardAction.None);
+		Check("editor clipboard: no event does nothing", CodeEditorWindow.ResolveClipboardAction(null) == CodeEditorWindow.ClipboardAction.None);
+
+		Check("editor clipboard: CRLF and lone CR become newlines",
+			CodeEditorWindow.NormalizeClipboardText("a\r\nb\rc") == "a\nb\nc");
+		Check("editor clipboard: null/empty normalize to empty",
+			CodeEditorWindow.NormalizeClipboardText(null) == "" && CodeEditorWindow.NormalizeClipboardText("") == "");
+
+		List<CodeEditorWindow.Keystroke> steps = CodeEditorWindow.BuildPasteKeystrokes("a\nb");
+		Check("editor clipboard: text becomes keystrokes with Enter for the newline",
+			steps.Count == 3
+			&& steps[0].Key == Key.None && steps[0].Unicode == 'a'
+			&& steps[1].Key == Key.Enter
+			&& steps[2].Unicode == 'b');
+		Check("editor clipboard: control characters are not typed as characters",
+			CodeEditorWindow.BuildPasteKeystrokes("a\tb").Count == 2
+			&& CodeEditorWindow.BuildPasteKeystrokes("\t").Count == 0);
+	}
+
+	/// <summary>
+	/// The one engine assumption the paste bridge rests on: a key event fed through
+	/// <see cref="Input.ParseInputEvent"/> really is delivered to nodes' <c>_Input</c>. The ImGui
+	/// addon is such a node, so this is what lets queued paste keystrokes reach the focused field —
+	/// the same class of spike `InputSelfTest` runs for the action layer.
+	/// </summary>
+	private sealed partial class KeyDeliveryProbe : Node
+	{
+		public int KeyPresses;
+		public int Characters;
+
+		public override void _Input(InputEvent @event)
+		{
+			InputEventKey key = @event as InputEventKey;
+			if (key == null || !key.Pressed) return;
+			KeyPresses++;
+			if (key.Unicode != 0) Characters++;
+		}
+	}
+
+	private static void TestPasteDelivery(BuilderScene scene)
+	{
+		KeyDeliveryProbe probe = new KeyDeliveryProbe();
+		probe.Name = "ClipboardDeliveryProbe";
+		scene.AddChild(probe);
+		// Godot enables input processing for an overridden _Input; the explicit call is here so the
+		// probe can never be the silent reason this check passes trivially.
+		probe.SetProcessInput(true);
+
+		// Driver: the real bridge, from the clipboard entry point's inner half through Tick — the
+		// same two calls Builder._Input and Builder._Process make.
+		CodeEditorWindow editor = new CodeEditorWindow(Builder.Instance);
+		editor.PasteText("hi\n");
+		editor.Tick(0.0);
+
+		Check("editor clipboard: a queued paste is delivered to nodes' _Input as typed keystrokes (" +
+			probe.Characters + " characters, " + probe.KeyPresses + " key presses)",
+			probe.Characters == 2 && probe.KeyPresses == 3);
+
+		int before = probe.KeyPresses;
+		editor.PasteText("");
+		editor.Tick(0.0);
+		Check("editor clipboard: an empty paste types nothing", probe.KeyPresses == before);
+
+		probe.QueueFree();
 	}
 
 	// --- Assertions (same shape as the other suites) ---
@@ -164,7 +267,7 @@ public static class EditorWorkflowSelfTest
 		Node3D third = MakeGroup(scratch, "Third");
 		Check("scratch has three children before delete", scratch.GetChildCount() == 3);
 
-		h.Push(new DeleteNodeCommand(second, scratch, second.GetIndex()));
+		h.Push(new DeleteNodesCommand(new Node[] { second }));
 		Check("delete detaches the node", second.GetParent() == null);
 		Check("delete keeps the node alive for undo", GodotObject.IsInstanceValid(second));
 		Check("scratch has two children after delete", scratch.GetChildCount() == 2);
@@ -180,6 +283,47 @@ public static class EditorWorkflowSelfTest
 		h.Clear();
 		Check("discarding a delete entry frees the detached node", second.IsQueuedForDeletion());
 
+		// A multi-selection delete is ONE entry that takes the whole set (the reported bug: only one
+		// item went). Four more siblings, on top of the surviving "created" and "third".
+		Node3D a = MakeGroup(scratch, "MultiA");
+		Node3D b = MakeGroup(scratch, "MultiB");
+		Node3D c = MakeGroup(scratch, "MultiC");
+		Node3D d = MakeGroup(scratch, "MultiD");
+		Check("six siblings to select", scratch.GetChildCount() == 6); // created, third, a, b, c, d
+		h.Push(new DeleteNodesCommand(new Node[] { c, a }));
+		Check("a two-node delete takes both", a.GetParent() == null && c.GetParent() == null);
+		Check("a two-node delete leaves the others", b.GetParent() == scratch && d.GetParent() == scratch);
+		Check("a multi-delete names the set in the history label",
+			h.UndoLabel != null && h.UndoLabel.Contains("2"));
+
+		h.Undo();
+		Check("one undo restores the whole set", a.GetParent() == scratch && c.GetParent() == scratch);
+		Check("one undo restores both indices (a at 2, c at 4)",
+			a.GetIndex() == 2 && c.GetIndex() == 4
+			&& scratch.GetChild(2) == a && scratch.GetChild(4) == c);
+
+		h.Redo();
+		Check("redo takes the set again", a.GetParent() == null && c.GetParent() == null && scratch.GetChildCount() == 4);
+
+		// A node inside another candidate's subtree needs no entry of its own: detaching the ancestor
+		// takes it, and its own recorded index would be meaningless. This one goes through the real
+		// scene entry point (BuilderScene.DeleteNodes → the real history), so the real history is
+		// cleared again afterwards.
+		Node3D parentGroup = MakeGroup(scratch, "MultiParent");
+		Node3D childGroup = MakeGroup(parentGroup, "MultiChild");
+		builder.Scene.DeleteNodes(new List<Node> { parentGroup, childGroup });
+		Check("deleting a parent and its child in one set is one entry taking the subtree",
+			parentGroup.GetParent() == null && childGroup.GetParent() == parentGroup);
+		builder.History.Undo();
+		Check("one undo brings the pair back", parentGroup.GetParent() == scratch && childGroup.GetParent() == parentGroup);
+		builder.History.Clear();
+
+		h.Clear();
+		a.QueueFree();
+		b.QueueFree();
+		c.QueueFree();
+		d.QueueFree();
+		parentGroup.QueueFree();
 		created.QueueFree();
 		third.QueueFree();
 	}
@@ -247,6 +391,59 @@ public static class EditorWorkflowSelfTest
 		CheckVec("redo reapplies the after transform", node.Position, new Vector3(1f, 2f, 3f));
 
 		node.QueueFree();
+	}
+
+	/// <summary>
+	/// The multi-object transform entry (the multi-select gizmo's undo): one command covering every
+	/// member, so a group drag is a single Ctrl+Z that restores positions, rotations and the
+	/// authored sizes of sized parts together.
+	/// </summary>
+	private static void TestGroupTransform(Builder builder, Node3D scratch)
+	{
+		EditorHistory h = new EditorHistory(builder);
+		Node3D first = MakeGroup(scratch, "GroupTransformA");
+		Node3D second = MakeGroup(scratch, "GroupTransformB");
+		LotObject sized = LotObject.Create(LotObjectKind.Cube, "GroupTransformSized", new Color(1f, 1f, 1f));
+		scratch.AddChild(sized);
+
+		Transform3D beforeFirst = first.Transform;
+		Transform3D beforeSecond = second.Transform;
+		Transform3D beforeSized = sized.Transform;
+		Vector3 beforeSize = sized.Size;
+
+		first.Position = new Vector3(1f, 0f, 0f);
+		second.Position = new Vector3(0f, 2f, 0f);
+		sized.Position = new Vector3(0f, 0f, 3f);
+		sized.SetSize(new Vector3(2f, 2f, 2f));
+
+		TransformNodesCommand command = new TransformNodesCommand();
+		command.Add(first, beforeFirst, first.Transform, null, Vector3.One, Vector3.One);
+		command.Add(second, beforeSecond, second.Transform, null, Vector3.One, Vector3.One);
+		command.Add(sized, beforeSized, sized.Transform, sized, beforeSize, sized.Size);
+		command.FinishLabel("Move");
+		Check("group transform: the entry counts its members", command.Count == 3);
+		Check("group transform: the label names the operation and the count", command.Label == "Move 3 Objects");
+
+		h.Push(command);
+		h.Undo();
+		CheckVec("group transform: undo restores the first member", first.Position, Vector3.Zero);
+		CheckVec("group transform: undo restores the second member", second.Position, Vector3.Zero);
+		CheckVec("group transform: undo restores the sized member's position", sized.Position, Vector3.Zero);
+		CheckVec("group transform: undo restores the sized member's size", sized.Size, beforeSize);
+		h.Redo();
+		CheckVec("group transform: redo reapplies the first member", first.Position, new Vector3(1f, 0f, 0f));
+		CheckVec("group transform: redo reapplies the sized member's position", sized.Position, new Vector3(0f, 0f, 3f));
+		CheckVec("group transform: redo reapplies the sized member's size", sized.Size, new Vector3(2f, 2f, 2f));
+
+		// A one-member entry keeps the plain label (a single-object drag routed through it).
+		TransformNodesCommand single = new TransformNodesCommand();
+		single.Add(first, beforeFirst, beforeFirst, null, Vector3.One, Vector3.One);
+		single.FinishLabel("Scale");
+		Check("group transform: a one-member entry is labelled without a count", single.Label == "Scale");
+
+		first.QueueFree();
+		second.QueueFree();
+		sized.QueueFree();
 	}
 
 	// --- Properties (end-to-end through the real Builder.History) ---

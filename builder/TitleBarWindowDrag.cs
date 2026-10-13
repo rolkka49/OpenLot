@@ -40,6 +40,16 @@ public sealed class TitleBarWindowDrag
 	}
 
 	/// <summary>
+	/// Pins the window to its tracked position once that is known, leaving ImGui's own first-use
+	/// placement untouched — for a window that declares no default position (the contrast with the
+	/// overload above, which seeds one). Usage is otherwise identical.
+	/// </summary>
+	public void BeforeBegin()
+	{
+		if (_positionKnown) ImGui.SetNextWindowPos(_position.X, _position.Y, ImGui.CondAlways);
+	}
+
+	/// <summary>
 	/// Re-syncs the tracked position from ImGui (so a layout file's position is honoured) and runs the
 	/// title-bar drag. <paramref name="windowOpen"/> is what <c>ImGui.Begin</c> returned: a closed window
 	/// is not laid out, so its reported position must not be trusted.

@@ -18,6 +18,10 @@ public class CommandRegistry
 		/// <summary>First-argument vocabulary for ghost auto-complete; null when the command
 		/// takes no sub-commands.</summary>
 		public string[] Subcommands;
+		/// <summary>Whether this command needs an unlocked account (§5.1's auth gate). Defaults to
+		/// true — a command is locked unless it is explicitly declared open — so a command a package
+		/// registers later cannot accidentally appear before login.</summary>
+		public bool RequiresLogin;
 	}
 
 	private readonly Dictionary<string, Command> registry = new Dictionary<string, Command>();
@@ -52,14 +56,55 @@ public class CommandRegistry
 
 	/// <summary>Declares a command. A duplicate name is ignored (first wins), matching the
 	/// pre-refactor behaviour. <paramref name="subcommands"/> is the first-argument vocabulary
-	/// the ghost suggestion completes against (null when there is none).</summary>
-	public void RegisterCommand(string name, string description, Action<string[]> handler, string[] subcommands = null)
+	/// the ghost suggestion completes against (null when there is none).
+	/// <paramref name="requiresLogin"/> is the §5.1 auth-gate flag; it defaults to true (locked),
+	/// so only the pre-login set passes false explicitly.</summary>
+	public void RegisterCommand(string name, string description, Action<string[]> handler,
+		string[] subcommands = null, bool requiresLogin = true)
 	{
 		if (string.IsNullOrEmpty(name)) return;
 		name = name.ToLower();
 		if (registry.ContainsKey(name)) return;
-		registry.Add(name, new Command { Name = name, Description = description, Handler = handler, Subcommands = subcommands });
+		registry.Add(name, new Command
+		{
+			Name = name,
+			Description = description,
+			Handler = handler,
+			Subcommands = subcommands,
+			RequiresLogin = requiresLogin
+		});
 		registrationOrder.Add(name);
+	}
+
+	/// <summary>
+	/// Looks a command up without running it. The auth gate needs the command's
+	/// <see cref="Command.RequiresLogin"/> before dispatch, and the alias expander needs to know
+	/// whether the head token is a real command (a real command always wins over an alias name).
+	/// </summary>
+	public bool TryGetCommand(string name, out Command command)
+	{
+		command = default;
+		if (string.IsNullOrEmpty(name)) return false;
+		return registry.TryGetValue(name.ToLower(), out command);
+	}
+
+	public bool HasCommand(string name)
+	{
+		return !string.IsNullOrEmpty(name) && registry.ContainsKey(name.ToLower());
+	}
+
+	/// <summary>
+	/// The §5.1 auth gate's whole rule, kept a pure function so it is verifiable headless: every
+	/// command needs an unlocked account except the ones registered with RequiresLogin = false
+	/// (<c>help</c>, <c>clear</c>, <c>login</c>, <c>register</c>).
+	///
+	/// The gate runs in <c>Terminal.ExecuteSubmittedCommand</c>, not in <see cref="Execute"/> — an
+	/// internal delegation (sysinfo -> neofetch) is already inside a gated call and must not be
+	/// re-gated.
+	/// </summary>
+	public static bool IsAllowed(bool isLoggedIn, Command command)
+	{
+		return isLoggedIn || !command.RequiresLogin;
 	}
 
 	/// <summary>Removes a command by name — the counterpart packages need at uninstall

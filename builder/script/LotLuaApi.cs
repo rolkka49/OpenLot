@@ -730,6 +730,112 @@ public class LotLuaApi
 	/// <summary>Spawns a UI scrollbar at (x, y) with the given size. Returns its handle, or -1.</summary>
 	public int SpawnUIScrollbar(float x, float y, float w, float h) { return SpawnUiInternal(LotUIKind.Scrollbar, new Vector2(x, y), new Vector2(w, h), ""); }
 
+	/// <summary>Spawns a checkbox with a label, ticked when <paramref name="initial"/> is true.
+	/// Milestone 5.3: the player's press raises the checkbox's <c>clicked</c> event and flips the
+	/// state before the handler runs, so a handler reads the new value with GetUIChecked. Returns
+	/// the handle, or -1.</summary>
+	public int SpawnUICheckbox(float x, float y, float w, float h, string label, bool initial)
+	{
+		int handle = SpawnUiInternal(LotUIKind.Checkbox, new Vector2(x, y), new Vector2(w, h), label);
+		if (handle < 0) return handle;
+		LotUIElement el = AsUiElement(handle, "SpawnUICheckbox");
+		if (el != null) el.Checked = initial;
+		return handle;
+	}
+
+	/// <summary>Spawns a dropdown whose options are the '|'-separated <paramref name="options"/> text
+	/// (the first option starts selected). Milestone 5.3. Returns the handle, or -1.</summary>
+	public int SpawnUIDropdown(float x, float y, float w, float h, string options)
+	{
+		int handle = SpawnUiInternal(LotUIKind.Dropdown, new Vector2(x, y), new Vector2(w, h), "");
+		if (handle < 0) return handle;
+		LotUIElement el = AsUiElement(handle, "SpawnUIDropdown");
+		if (el != null)
+		{
+			el.SetOptionsFromText(options);
+			if (el.Options.Count > 0) el.SelectedIndex = 0;
+		}
+		return handle;
+	}
+
+	/// <summary>Spawns a clipping, scrolling region at (x, y) with the given size. Its contents are
+	/// child LOT UI elements attached under it (milestone 5.3). Returns the handle, or -1.</summary>
+	public int SpawnUIScrollContainer(float x, float y, float w, float h) { return SpawnUiInternal(LotUIKind.ScrollContainer, new Vector2(x, y), new Vector2(w, h), ""); }
+
+	/// <summary>Whether a checkbox is ticked (false for any other kind).</summary>
+	public bool GetUIChecked(int handle)
+	{
+		LotUIElement el = AsUiElement(handle, "GetUIChecked");
+		return el != null && el.Checked;
+	}
+
+	/// <summary>Ticks or clears a checkbox.</summary>
+	public void SetUIChecked(int handle, bool checkedValue)
+	{
+		LotUIElement el = AsUiElement(handle, "SetUIChecked");
+		if (el != null) el.Checked = checkedValue;
+	}
+
+	/// <summary>The dropdown's options as the '|'-separated text ("" for any other kind).</summary>
+	public string GetUIDropdownOptions(int handle)
+	{
+		LotUIElement el = AsUiElement(handle, "GetUIDropdownOptions");
+		return el != null ? el.OptionsToText() : "";
+	}
+
+	/// <summary>Replaces a dropdown's options from the '|'-separated text (up to
+	/// <see cref="LotUIElement.MaxOptions"/>). A selection whose text no longer exists is cleared.</summary>
+	public void SetUIDropdownOptions(int handle, string options)
+	{
+		LotUIElement el = AsUiElement(handle, "SetUIDropdownOptions");
+		if (el != null) el.SetOptionsFromText(options);
+	}
+
+	/// <summary>The dropdown's selected option text, or "" when nothing is selected.</summary>
+	public string GetUIDropdownSelection(int handle)
+	{
+		LotUIElement el = AsUiElement(handle, "GetUIDropdownSelection");
+		return el != null ? el.SelectedOption() : "";
+	}
+
+	/// <summary>Selects a dropdown option by its text. Selecting a text that is not an option
+	/// changes nothing (a script cannot select something the player cannot see).</summary>
+	public void SetUIDropdownSelection(int handle, string option)
+	{
+		LotUIElement el = AsUiElement(handle, "SetUIDropdownSelection");
+		if (el != null) el.SetSelectedByName(option);
+	}
+
+	/// <summary>Whether a lot UI element is drawn. Hiding an element keeps it selectable in the
+	/// editor and keeps its subscriptions; only its drawing stops.</summary>
+	public bool GetUIVisible(int handle)
+	{
+		LotUIElement el = AsUiElement(handle, "GetUIVisible");
+		return el != null && el.Visible;
+	}
+
+	/// <summary>Shows or hides a lot UI element.</summary>
+	public void SetUIVisible(int handle, bool visible)
+	{
+		LotUIElement el = AsUiElement(handle, "SetUIVisible");
+		if (el != null) el.Visible = visible;
+	}
+
+	/// <summary>The element's horizontal text alignment ("Left", "Center" or "Right").</summary>
+	public string GetUITextAlign(int handle)
+	{
+		LotUIElement el = AsUiElement(handle, "GetUITextAlign");
+		return el != null ? LotUiRenderer.AlignName(el.TextAlign) : "Left";
+	}
+
+	/// <summary>Sets the element's horizontal text alignment by name (an unknown name falls back to
+	/// Left).</summary>
+	public void SetUITextAlign(int handle, string align)
+	{
+		LotUIElement el = AsUiElement(handle, "SetUITextAlign");
+		if (el != null) el.TextAlign = LotUiRenderer.AlignFromName(align);
+	}
+
 	/// <summary>Sets the label text of a Button or Text element.</summary>
 	public void SetUIText(int handle, string text)
 	{
@@ -1515,6 +1621,16 @@ public class LotLuaApi
 	{
 		if (_scene == null) return "";
 		return _scene.LocalPlayerId;
+	}
+
+	/// <summary>The local player's display name (milestone 3.12a): the name they entered at
+	/// register/import; "" for a guest. Presentation only — the stable key is
+	/// <see cref="GetLocalPlayer"/>, and names can collide and are never identity. Use it for a name
+	/// tag, a welcome line or a scoreboard label; showing it to *other* players is §10.1's job.</summary>
+	public string GetLocalPlayerName()
+	{
+		if (_scene == null) return "";
+		return _scene.LocalPlayerName;
 	}
 
 	/// <summary>The stored value for (player, key): a number, a string or a boolean; nil when the

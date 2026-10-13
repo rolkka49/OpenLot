@@ -219,8 +219,28 @@ public static class LotSceneLoad
 			ReadStringProperty(record, "label"));
 		element.Color = record.Color;
 		element.Visible = ReadBoolProperty(record, "visible", true);
+		ApplyUiCustomization(element, record, report);
 		report.UiCreated++;
 		return element;
+	}
+
+	/// <summary>
+	/// Applies a UI element's declared customization properties (milestone 5.3: label, text
+	/// alignment, checkbox state, dropdown options/selection) through the same descriptor table the
+	/// Inspector writes — so a new UI property needs no change here. Ids this build does not
+	/// declare are ignored silently: "visible" is handled explicitly above and is not a descriptor,
+	/// and an id from a newer build simply has nothing to apply.
+	/// </summary>
+	private static void ApplyUiCustomization(LotUIElement element, LotArchive.LotNodeRecord record, LoadReport report)
+	{
+		if (record == null || record.Properties == null) return;
+		foreach (System.Collections.Generic.KeyValuePair<Variant, Variant> pair in record.Properties)
+		{
+			if (pair.Key.VariantType != Variant.Type.String) continue;
+			LotPropertyDescriptor descriptor = LotPropertyRegistry.Find(pair.Key.AsString());
+			if (descriptor == null) continue;
+			ApplyOneProperty(element, descriptor, pair.Value, report);
+		}
 	}
 
 	/// <summary>

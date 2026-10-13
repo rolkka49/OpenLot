@@ -27,7 +27,6 @@ public class InspectorPanel
 	private bool _sizeSession;
 	private Vector2 _editUiPos;
 	private Vector2 _editUiSize;
-	private string _editUiLabel = "";
 	private string _editName = "";
 	private ulong _trackedNode = 0;
 
@@ -41,7 +40,6 @@ public class InspectorPanel
 	private Color _colorBefore;
 	private bool _colorSession;
 	private string _nameBefore = "";
-	private string _labelBefore = "";
 
 	// Float property edit session (milestone 3.6): the "before" value captured on activation, and
 	// the id of the property being edited, so a widget that loses the edit commits exactly once.
@@ -128,9 +126,10 @@ public class InspectorPanel
 
 			if (selected is LotScriptNode)
 				ImGui.TextDisabled("Lua script — double-click in the hierarchy to open.");
-
-			ImGui.EndChild();
 		}
+		// EndChild() is unconditional: BeginChild() returns false for a clipped/collapsed child,
+		// which skips the body but not the pairing ImGui requires.
+		ImGui.EndChild();
 
 		ImGui.End();
 	}
@@ -234,7 +233,11 @@ public class InspectorPanel
 	private void DrawChoiceProperty(Builder builder, Node selected, LotPropertyDescriptor descriptor)
 	{
 		string current = builder.Properties.ReadChoice(selected, descriptor);
-		string[] options = descriptor.ListOptions != null ? descriptor.ListOptions() : System.Array.Empty<string>();
+		// A Choice whose options belong to the node (milestone 5.3's dropdown selection) supplies
+		// them per node; every earlier Choice carries one static list.
+		string[] options = descriptor.ListOptionsFor != null
+			? (descriptor.ListOptionsFor(selected) ?? System.Array.Empty<string>())
+			: (descriptor.ListOptions != null ? descriptor.ListOptions() : System.Array.Empty<string>());
 		string[] items = BuildOptionArray(descriptor, options);
 
 		// With the texture affordances, row 0 is "(none)" and the last row is "Import...", so the
@@ -434,26 +437,9 @@ public class InspectorPanel
 		else if (!ImGui.IsItemActive()) _editUiSize = ui.Size;
 		if (ImGui.IsItemDeactivatedAfterEdit()) CommitUiRect(builder, ui, "Resize UI");
 
-		if (ui.Kind == LotUIKind.Button || ui.Kind == LotUIKind.Text)
-		{
-			string editedLabel = ImGui.InputText("Label", _editUiLabel, 128);
-			if (ImGui.IsItemActivated()) _labelBefore = ui.Label;
-			if (ImGui.IsItemDeactivatedAfterEdit())
-			{
-				if (editedLabel != ui.Label)
-				{
-					string after = editedLabel;
-					string before = _labelBefore;
-					builder.History.Push(new DelegateCommand("Rename UI",
-						b => { if (GodotObject.IsInstanceValid(ui)) ui.Label = after; },
-						b => { if (GodotObject.IsInstanceValid(ui)) ui.Label = before; }));
-				}
-			}
-			else
-			{
-				_editUiLabel = editedLabel;
-			}
-		}
+		// The label is a declared property now (milestone 5.3): DrawProperties draws it with the
+		// same typed widget and the same one-entry-per-edit-session undo rule, so the bespoke field
+		// that used to live here is gone (no duplicate paths).
 
 		Color color = ImGui.ColorEdit4("Color", ui.Color);
 		if (ImGui.IsItemActivated()) { _colorBefore = ui.Color; _colorSession = true; }
@@ -579,7 +565,6 @@ public class InspectorPanel
 		{
 			_editUiPos = ui.Position;
 			_editUiSize = ui.Size;
-			_editUiLabel = ui.Label;
 			return;
 		}
 		Node3D n3d = node as Node3D;

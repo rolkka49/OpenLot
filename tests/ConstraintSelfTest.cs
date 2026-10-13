@@ -44,6 +44,7 @@ public static class ConstraintSelfTest
 		TestChainGauge();
 		TestPersistence(scene);
 		TestSession(scene);
+		TestSessionSnapshotParking(scene);
 		TestFullRoundTrip(scene);
 		TestFloatKind(scene);
 		TestLuaBindings();
@@ -54,6 +55,97 @@ public static class ConstraintSelfTest
 		// and moves the parts — is verified across frames by the staged probe (TickGravityProbe).
 		StartGravityProbe(scene);
 		return _failures;
+	}
+
+	// --- the session snapshot's park/reattach contract (§3.4 "instance of the lot") -----------------
+
+	/// <summary>
+	/// The mechanism that makes stopping a session a REVERT instead of another run of the lot's code:
+	/// the authored load-time script spawns are taken out of the tree for the session (the reload
+	/// would otherwise free and re-create them, and the exit would have no way back to them except
+	/// running every script again) and put back exactly where they were.
+	///
+	/// Uses an empty snapshot rather than <see cref="LotSessionSnapshot.Capture"/> — parking does not
+	/// depend on captured state, and capturing the live lot here would take texture holds the suite
+	/// would then have to release.
+	/// </summary>
+	private static void TestSessionSnapshotParking(BuilderScene scene)
+	{
+		Node3D host = new Node3D();
+		host.Name = "SnapshotParkingScratch";
+		scene.AddChild(host);
+
+		Node3D authored = new Node3D(); authored.Name = "Authored"; host.AddChild(authored);
+		Node3D spawn = new Node3D(); spawn.Name = "Spawn"; spawn.SetMeta(LotLuaApi.LoadSpawnOwnerMeta, "user://Scripts/park.lua"); host.AddChild(spawn);
+		Node3D innerHost = new Node3D(); innerHost.Name = "InnerHost"; host.AddChild(innerHost);
+		Node3D nestedSpawn = new Node3D(); nestedSpawn.Name = "NestedSpawn"; nestedSpawn.SetMeta(LotLuaApi.LoadSpawnOwnerMeta, "user://Scripts/park.lua"); innerHost.AddChild(nestedSpawn);
+
+		LotSessionSnapshot snapshot = new LotSessionSnapshot();
+		snapshot.ParkScriptSpawns(host, host);
+
+		Check("parking takes a load-time spawn out of the tree", spawn.GetParent() == null);
+		Check("parking keeps the spawn alive (it comes back on exit)", GodotObject.IsInstanceValid(spawn));
+		Check("parking is recursive — a nested spawn is parked too", nestedSpawn.GetParent() == null);
+		Check("parking leaves authored nodes alone",
+			authored.GetParent() == host && innerHost.GetParent() == host && host.GetChildCount() == 2);
+
+		snapshot.ReattachScriptSpawns(node => node.QueueFree());
+
+		Check("reattaching puts the spawn back under its parent", spawn.GetParent() == host);
+		Check("reattaching restores its index (Spawn was child 1)",
+			host.GetChildCount() == 3 && spawn.GetIndex() == 1 && host.GetChild(1) == spawn);
+		Check("reattaching puts a nested spawn back under its own parent",
+			nestedSpawn.GetParent() == innerHost && nestedSpawn.GetIndex() == 0);
+
+		// The session destroyed the spawn's parent: the spawn cannot come back, so it must go through
+		// the destroy path rather than being re-attached to a dying subtree (which would leak its
+		// handle — the destroy walk has already finished cleaning that subtree).
+		snapshot.ParkScriptSpawns(host, host);
+		innerHost.QueueFree();
+		snapshot.ReattachScriptSpawns(node => node.QueueFree());
+		Check("a spawn whose parent the session destroyed is dropped, not re-attached",
+			nestedSpawn.IsQueuedForDeletion() && spawn.GetParent() == host);
+
+		host.QueueFree();
+	}
+
+	/// <summary>The first load-time script spawn in the subtree (the default lot's capsule character),
+	/// or null — the same tag the runtime's own cleanup walk keys on. Nodes already queued for
+	/// deletion are skipped so a session spawn that is one frame from gone is not counted.</summary>
+	private static Node FindLoadSpawn(Node parent)
+	{
+		int count = parent.GetChildCount();
+		for (int i = 0; i < count; i++)
+		{
+			Node child = parent.GetChild(i);
+			if (child.IsQueuedForDeletion()) continue;
+			if (child.HasMeta(LotObject.InternalChildMeta)) continue;
+			if (child.HasMeta(LotLuaApi.LoadSpawnOwnerMeta)) return child;
+			Node deeper = FindLoadSpawn(child);
+			if (deeper != null) return deeper;
+		}
+		return null;
+	}
+
+	/// <summary>How many load-time script spawns the subtree holds — a re-run that re-created the
+	/// character instead of restoring it would show up as a different count.</summary>
+	private static int CountLoadSpawns(Node parent)
+	{
+		int total = 0;
+		int count = parent.GetChildCount();
+		for (int i = 0; i < count; i++)
+		{
+			Node child = parent.GetChild(i);
+			if (child.IsQueuedForDeletion()) continue;
+			if (child.HasMeta(LotObject.InternalChildMeta)) continue;
+			if (child.HasMeta(LotLuaApi.LoadSpawnOwnerMeta))
+			{
+				total++;
+				continue;
+			}
+			total += CountLoadSpawns(child);
+		}
+		return total;
 	}
 
 	// --- staged gravity probe (runs across physics frames; driven by BuilderScene._Process) --------
@@ -98,6 +190,12 @@ public static class ConstraintSelfTest
 	private static ulong _probeDeadlineMsec;
 	private static int _probeStage; // 0 = not started, 1 = waiting for time, 2 = finished
 	private static int _probeChecks;
+
+	// The lot's authored load-time script spawns (the default lot's capsule character among them):
+	// their identity and count are captured before the session so the exit can prove that stopping a
+	// test restored them instead of running every script again.
+	private static ulong _probeAuthoredSpawnId;
+	private static int _probeLoadSpawnCount;
 	private static int _probeFailures;
 
 	/// <summary>Whether the staged probe completed; the scene warns when a run ends too early.</summary>
@@ -188,6 +286,17 @@ public static class ConstraintSelfTest
 		_probeDeadlineMsec = Time.GetTicksMsec() + GravityProbeWaitMsec;
 		_probeStage = 1;
 		GD.Print("[ConstraintSelfTest] gravity probe started (waiting " + GravityProbeWaitMsec + " ms)");
+
+		// Before the session: which authored script spawns exist, and which node is the first of them.
+		Node authoredSpawn = FindLoadSpawn(scene.LotRoot);
+		_probeAuthoredSpawnId = authoredSpawn != null ? authoredSpawn.GetInstanceId() : 0;
+		_probeLoadSpawnCount = CountLoadSpawns(scene.LotRoot);
+		if (_probeAuthoredSpawnId == 0)
+		{
+			GD.Print("[ConstraintSelfTest] note: this lot has no load-time script spawn, so the "
+				+ "session-spawn identity check is skipped");
+		}
+
 		scene.EnterTestMode(false);
 
 		// Drive the character: face -Z deterministically (the orbit seeds from the freecam's yaw,
@@ -250,6 +359,20 @@ public static class ConstraintSelfTest
 		float restoredY = _probeFall.GlobalPosition.Y;
 		ProbeCheck("leaving Test mode restored the part's transform (" + _probeFallStartY + " -> " + restoredY + ")",
 			Mathf.Abs(restoredY - _probeFallStartY) < 0.01f);
+
+		// Stopping a session is a REVERT, not another run of the lot's code: the session's script
+		// runtime is gone (not restarted), and the spawns the lot's scripts created at load are the
+		// SAME nodes they were before the session — carried through it, not re-created by a re-run.
+		ProbeCheck("leaving Test mode does not re-run the lot's scripts (session runtime stopped)",
+			_probeScene.LuaScripts == null);
+		if (_probeAuthoredSpawnId != 0)
+		{
+			Node back = FindLoadSpawn(_probeScene.LotRoot);
+			ProbeCheck("the authored script spawn survives the session as the SAME node, and no re-run"
+				+ " duplicated it (" + _probeLoadSpawnCount + " before, " + CountLoadSpawns(_probeScene.LotRoot) + " after)",
+				back != null && back.GetInstanceId() == _probeAuthoredSpawnId
+					&& CountLoadSpawns(_probeScene.LotRoot) == _probeLoadSpawnCount);
+		}
 		_probeScene.DestroyEntity(_probeFall);
 		_probeScene.DestroyEntity(_probeHingeAnchor);
 		_probeScene.DestroyEntity(_probeHingeSwing);

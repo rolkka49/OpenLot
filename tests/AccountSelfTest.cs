@@ -17,6 +17,7 @@ public static class AccountSelfTest
 {
 	private const string ScratchPath = "user://account_selftest.cfg";
 	private const string ScratchImportPath = "user://account_selftest_import.cfg";
+	private const string ScratchResetPath = "user://account_selftest_reset.cfg";
 	private static int _checks;
 	private static int _failures;
 
@@ -33,6 +34,7 @@ public static class AccountSelfTest
 		TestChallenge();
 		TestStore();
 		TestSessionFlows();
+		TestReset();
 		TestLuaBoundary();
 
 		CleanupScratchFiles();
@@ -45,6 +47,7 @@ public static class AccountSelfTest
 	{
 		RemoveIfPresent(ScratchPath);
 		RemoveIfPresent(ScratchImportPath);
+		RemoveIfPresent(ScratchResetPath);
 	}
 
 	private static void RemoveIfPresent(string path)
@@ -261,6 +264,10 @@ public static class AccountSelfTest
 		Check("session: register on a device that holds an account refuses (no clobber)",
 			!reopening.Register("Eve", out string takenMessage, out string takenReveal) &&
 			takenReveal.Length == 0 && takenMessage.Contains("already holds"));
+		// The refusal must be actionable: it names the stored account, the name it did NOT apply, and
+		// the way forward — the three things that made the first cut read as a mystery.
+		Check("session: the no-clobber refusal names the account, the refused name and the fix",
+			takenMessage.Contains("Ada") && takenMessage.Contains("'Eve'") && takenMessage.Contains("login"));
 		Check("session: login unlocks the stored account",
 			reopening.Unlock(out string welcome) && reopening.IsUnlocked && welcome.Contains("Ada"));
 		Check("session: unlock twice refuses",
@@ -286,9 +293,61 @@ public static class AccountSelfTest
 		Check("session: the imported account unlocks on the next run",
 			reopeningImport.Unlock(out string importedWelcome) && reopeningImport.AccountId == imported.AccountId && importedWelcome.Contains("player-"));
 
+		// Re-pasting the SAME key is that account, not a clash: it unlocks, and the stored profile is
+		// kept (a login must not rewrite presentation). This is the "I pasted my own key" case.
+		AccountSession sameKey = new AccountSession(ScratchImportPath);
+		Check("session: importing this device's own key unlocks instead of clashing",
+			sameKey.Import(imported.KeyString, "Renamed", out string sameMessage) &&
+			sameKey.IsUnlocked && sameKey.AccountId == imported.AccountId);
+		Check("session: the re-paste keeps the stored display name and reports the account",
+			sameKey.DisplayName == "player-" + imported.AccountId.Substring(0, 6) &&
+			sameMessage.Contains(imported.AccountId));
+
 		AccountSession clobber = new AccountSession(ScratchImportPath);
 		Check("session: import refuses to clobber the stored account",
 			!clobber.Import(AccountKey.Create().KeyString, "Bob", out string clobberMessage) && clobberMessage.Contains("already holds"));
+	}
+	/// <summary>
+	/// The "I lost my key" reset (the `unregister` command's session half): the precondition query the
+	/// terminal checks before it asks anything, and Remove's effect — file gone, session locked, and
+	/// the device able to register a fresh account straight afterwards.
+	/// </summary>
+	private static void TestReset()
+	{
+		AccountSession fresh = new AccountSession(ScratchResetPath);
+		Check("reset: nothing to remove on a device with no account",
+			!fresh.Remove(out string emptyMessage) && emptyMessage.Contains("No account"));
+		Check("reset: a device with no account can store one", fresh.CanStoreNewAccount(out string _));
+		Check("startup: a device with no account does not sign in by itself",
+			!AccountSession.UnlocksAtStartup(ScratchResetPath));
+		Check("reset: register works on the scratch device", fresh.Register("Zoe", out string _, out string _) && fresh.IsUnlocked);
+		Check("startup: a device that now holds an account signs in by itself",
+			AccountSession.UnlocksAtStartup(ScratchResetPath));
+
+		AccountSession locked = new AccountSession(ScratchResetPath);
+		Check("reset: a device that holds an account refuses a new one before any prompt",
+			!locked.CanStoreNewAccount(out string blocked) && blocked.Contains("already holds"));
+
+		AccountSession unlocked = new AccountSession(ScratchResetPath);
+		unlocked.Unlock(out string _);
+		Check("reset: an unlocked session refuses a new account too",
+			!unlocked.CanStoreNewAccount(out string busy) && busy.Contains("already logged in"));
+
+		AccountSession remover = new AccountSession(ScratchResetPath);
+		remover.Unlock(out string _);
+		Check("reset: Remove deletes the file and locks the session",
+			remover.Remove(out string removedMessage) && !remover.IsUnlocked && !AccountStore.Exists(ScratchResetPath));
+		Check("reset: the removal is reported with the way forward", removedMessage.Contains("removed"));
+		Check("startup: the reset stops the automatic sign-in",
+			!AccountSession.UnlocksAtStartup(ScratchResetPath));
+
+		AccountSession after = new AccountSession(ScratchResetPath);
+		Check("reset: the account is really gone (unlock refuses with guidance)",
+			!after.Unlock(out string goneMessage) && goneMessage.Contains("register"));
+		Check("reset: the device can register a fresh account afterwards",
+			after.Register("Zoe2", out string _, out string _) && after.IsUnlocked);
+
+		AccountStore.Delete(ScratchResetPath);
 	}
 	// --- the §1.1 boundary: no signing/key operation is reachable from Lua -----------------------
 

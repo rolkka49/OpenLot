@@ -69,22 +69,25 @@ public enum QueryVolumeShape
 /// its MeshInstance3D child carries a per-object StandardMaterial3D so Lua SetColor and the
 /// inspector's color edit recolor one object without touching shared materials.
 ///
-/// Two internal children were added for build-mode interaction. Both are marked with
-/// <see cref="InternalChildMeta"/> so the hierarchy never shows them as rows and so callers can
-/// tell them apart from real objects:
-///   * "Outline"   — an inverted-hull MeshInstance3D used for the selection / drag highlight.
+/// One internal child was added for build-mode interaction, marked with
+/// <see cref="InternalChildMeta"/> so the hierarchy never shows it as a row and so callers can
+/// tell it apart from real objects:
 ///   * "Collision" — a StaticBody3D whose CollisionShape3D is what picking raycasts hit and what
 ///                   direct dragging collides against.
 ///
-/// A query volume (milestone 3.13) swaps the last two for its own pair: a "QueryVisual" preview
-/// (build mode only) and a "QueryPick" proxy pinned to the no-collide layer, so it is selectable
-/// in the editor and invisible to every gameplay mask.
+/// The selection highlight is NOT a scene object: it is a screen-space (2D) outline drawn by
+/// <see cref="SelectionOutline"/> from the <see cref="OutlineState"/> this node carries — see that
+/// class for why the earlier world-space inverted hull was replaced.
+///
+/// A query volume (milestone 3.13) swaps the collision child for its own pair: a "QueryVisual"
+/// preview (build mode only) and a "QueryPick" proxy pinned to the no-collide layer, so it is
+/// selectable in the editor and invisible to every gameplay mask.
 /// </summary>
 public partial class LotObject : Node3D
 {
 	/// <summary>
-	/// Meta key marking children that are implementation details of a lot object (mesh, outline,
-	/// collision body, drag mover). The hierarchy skips any node carrying it.
+	/// Meta key marking children that are implementation details of a lot object (mesh, collision
+	/// body, drag mover). The hierarchy skips any node carrying it.
 	/// </summary>
 	public const string InternalChildMeta = "openlot_internal";
 
@@ -126,14 +129,8 @@ public partial class LotObject : Node3D
 	/// hazard rather than a meaningful weight.</summary>
 	public const float MinExplicitMass = 0.01f;
 
-	// Selection blue matches LotUIElement's outline so 3D and UI selections read the same.
-	private static readonly Color OutlineSelectedColor = new Color(0.18f, 0.52f, 0.89f, 1f);
-	private static readonly Color OutlineDraggedColor = new Color(0.35f, 0.72f, 1.0f, 1f);
-
-	// Shared across every object: the outline colour depends on the state, not the object, so one
-	// material per state is enough and no per-object material is created.
-	private static StandardMaterial3D _outlineSelectedMaterial;
-	private static StandardMaterial3D _outlineDraggedMaterial;
+	// The selection highlight's colours live with the screen-space outline that draws them
+	// (SelectionOutline), because the highlight is no longer a per-object material.
 
 	public LotObjectKind Kind { get; private set; }
 	public MeshInstance3D MeshInstance { get; private set; }
@@ -271,8 +268,6 @@ public partial class LotObject : Node3D
 	private float _decalFontSize = 48f;
 	private Label3D _decalLabel;
 	private MeshInstance3D _decalThumb;
-
-	private MeshInstance3D _outline;
 
 	// Query-volume state (milestone 3.13): the shape it samples and a sphere's radius (a box uses
 	// the authored Size). The preview mesh is an internal child, like the decal's content nodes.
@@ -429,36 +424,16 @@ public partial class LotObject : Node3D
 		if (kind == LotObjectKind.QueryVolume)
 		{
 			// The generic mesh/material exist but stay hidden; the volume's build-mode preview and
-			// its editor pick proxy are its real children, and there is no outline hull — a volume
-			// is a region, so a silhouette tint would misrepresent its shape.
+			// its editor pick proxy are its real children, and it carries no selection silhouette
+			// — a volume is a region, so an outline of its bounds would misrepresent its shape.
 			mesh.Visible = false;
 			obj.AddQueryVolumeChildren();
 			obj.RefreshQueryVolumeVisual();
 			return obj;
 		}
 
-		obj.AddOutlineChild(meshResource);
 		obj.AddCollisionChild(collisionResource);
 		return obj;
-	}
-
-	/// <summary>
-	/// Inverted-hull outline: a slightly grown copy of the mesh with the front faces culled and no
-	/// lighting, so only the ring that pokes past the silhouette shows. Depth-tested, which means
-	/// it is correctly hidden behind other parts rather than drawing through them.
-	/// </summary>
-	private void AddOutlineChild(Mesh meshResource)
-	{
-		MeshInstance3D outline = new MeshInstance3D();
-		outline.Name = "Outline";
-		outline.Mesh = meshResource;
-		outline.MaterialOverride = SelectedOutlineMaterial;
-		outline.CastShadow = GeometryInstance3D.ShadowCastingSetting.Off;
-		outline.Visible = false;
-		outline.SetMeta(InternalChildMeta, true);
-
-		_outline = outline;
-		AddChild(outline);
 	}
 
 	private void AddCollisionChild(Shape3D shapeResource)
@@ -714,9 +689,8 @@ public partial class LotObject : Node3D
 
 	/// <summary>
 	/// Rebuilds everything derived from the authored size and UV mode in one place: the visual
-	/// mesh (shared through the factory's cache), the outline hull, the collision shape and the
-	/// event sensor, and every decal parented to this part (a patch's placement is derived from
-	/// the host's mesh size).
+	/// mesh (shared through the factory's cache), the collision shape, the event sensor, and every
+	/// decal parented to this part (a patch's placement is derived from the host's mesh size).
 	/// </summary>
 	private void RefreshGeneratedGeometry()
 	{
@@ -729,7 +703,6 @@ public partial class LotObject : Node3D
 		}
 
 		PartMeshFactory.UpdatePartMesh(MeshInstance, ShapeFor(Kind), _size, _textureTilesPerUnit, _textureUvMode);
-		if (_outline != null && GodotObject.IsInstanceValid(_outline)) _outline.Mesh = MeshInstance.Mesh;
 		ResizeCollision();
 		RefreshEventSensor();
 		RefreshChildDecals();
@@ -1563,66 +1536,37 @@ public partial class LotObject : Node3D
 	/// Sets the selection highlight. Cheap and idempotent, so callers can sync it freely without
 	/// worrying about redundant work.
 	/// </summary>
+	/// <summary>
+	/// Sets the selection highlight state. Cheap and idempotent, so callers can sync it freely
+	/// without worrying about redundant work.
+	///
+	/// This only records state: the visible highlight is the screen-space outline
+	/// <see cref="SelectionOutline"/> draws from it, so no node or material is created or freed
+	/// here. An object with nothing to outline (a decal's transform is derived; a query volume is
+	/// a region) is a no-op, so a selection walk can call this on every lot object.
+	/// </summary>
 	public void SetOutline(LotOutlineState state)
 	{
-		// A decal carries no outline hull (there is nothing to draw a ring around), so every
-		// selection path that walks the lot can call this freely and it is simply a no-op.
-		if (_outline == null)
-		{
-			return;
-		}
-
-		if (OutlineState == state)
+		if (!HasOutlineSilhouette)
 		{
 			return;
 		}
 
 		OutlineState = state;
-		if (state == LotOutlineState.None)
-		{
-			_outline.Visible = false;
-			return;
-		}
-
-		_outline.MaterialOverride = state == LotOutlineState.Dragged ? DraggedOutlineMaterial : SelectedOutlineMaterial;
-		_outline.Visible = true;
 	}
 
-	private static StandardMaterial3D SelectedOutlineMaterial
+	/// <summary>
+	/// True when this object has a silhouette worth outlining. A decal and a query volume
+	/// deliberately do not: a decal's transform is derived from its host's face, and a volume is a
+	/// region rather than a surface, so a silhouette ring would misrepresent either.
+	/// </summary>
+	public bool HasOutlineSilhouette
 	{
 		get
 		{
-			if (_outlineSelectedMaterial == null)
-			{
-				_outlineSelectedMaterial = MakeOutlineMaterial(OutlineSelectedColor);
-			}
-			return _outlineSelectedMaterial;
+			return Kind != LotObjectKind.Decal
+				&& Kind != LotObjectKind.QueryVolume
+				&& MeshInstance != null;
 		}
-	}
-
-	private static StandardMaterial3D DraggedOutlineMaterial
-	{
-		get
-		{
-			if (_outlineDraggedMaterial == null)
-			{
-				_outlineDraggedMaterial = MakeOutlineMaterial(OutlineDraggedColor);
-			}
-			return _outlineDraggedMaterial;
-		}
-	}
-
-	private static StandardMaterial3D MakeOutlineMaterial(Color color)
-	{
-		StandardMaterial3D material = new StandardMaterial3D();
-		material.ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded;
-		// Culling the front faces leaves only the back of the grown shell visible, which is what
-		// produces the ring around the silhouette while the object itself covers the rest.
-		material.CullMode = BaseMaterial3D.CullModeEnum.Front;
-		material.Grow = true;
-		material.GrowAmount = 0.02f;
-		material.AlbedoColor = color;
-		material.DisableReceiveShadows = true;
-		return material;
 	}
 }

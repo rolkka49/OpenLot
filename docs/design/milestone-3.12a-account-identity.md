@@ -46,14 +46,31 @@ Run 'login <key>' on another device to use the account there. ...
 
 > logout                       -> locked; the account stays on this device
 > login                        -> "Welcome back, Ada. Account 8Xk2..." (unlocks the stored key)
-> login <key> [name]           -> imports the account on another device (same Account ID)
+> login <key>                  -> imports the account on another device (same Account ID)
+name> Ada                       -> the display name is ASKED FOR (a key carries no profile)
+> unregister                   -> names the account that would be deleted, deletes nothing
+> unregister confirm           -> deletes this device's account (the lost-key reset)
 ```
 
 * `register <name>` creates the device's account, stores it, unlocks it, and reveals the key **once**.
 * `login` (no argument) unlocks the account stored on this device.
-* `login <key> [name]` imports one from its key string — the cross-device move is a paste.
+* **A launch signs itself in** when this device holds an account: v1 stores the key plaintext (D6), so
+  there is no secret left to ask for and retyping `login` on every start protects nothing. `logout`
+  still locks for the rest of the session, and a passphrase is the one thing that would make the
+  automatic sign-in stop (`AccountSession.UnlocksAtStartup` is that rule, in one place).
+* `login <key>` with **this device's own key** is an unlock, not an import: the key is the account, so
+  nothing would be destroyed and the stored display name is kept. Only a key for a *different* account
+  hits the no-clobber refusal.
+* `login <key> [name]` imports one from its key string — the cross-device move is a paste. **With no
+  name the terminal asks for one**, because the key carries the account and never a profile; `-`
+  accepts a generated name and an empty line cancels. The name is presentation (D9), so it never has
+  to match whatever the account was called on the device it came from.
+* `unregister` / `unregister confirm` deletes this device's account — the **lost-key reset** — after
+  naming the account it would remove. It is deliberately pre-login: losing a key leaves the device
+  locked out, so the reset must be reachable without signing in.
 * `logout` locks. Register and import **refuse to clobber** an existing account file (overwriting
-  would destroy a key that cannot be re-created); a switch-account flow is a later surface.
+  would destroy a key that cannot be re-created); `unregister` is the explicit, confirmed way to start
+  over, and a general switch-account flow is still a later surface.
 * The §5.1 Unity-parity command list is deliberately re-specified (called out there): `register`
   no longer treats a username as the account; the display name is local presentation.
 
@@ -109,7 +126,7 @@ you send cannot replay it anywhere else, ever.
 | D5 | **Signing is a fixed-schema core operation.** The client core signs one kind of thing — a handshake challenge — and Lua gets no signing verb, no seed, no key string. This is the §1.1 boundary extended to the account key, and it kills the "wallet drainer" class of attack (a hostile script tricking the client into signing something meaningful) by there being nothing meaningful to sign. | `AccountKey` doc, `AccountSelfTest` boundary tripwire |
 | D6 | **Storage is `user://account.cfg`** (Godot `ConfigFile`, the same format family as the wallpaper setting; §5.4 will adopt it). Plaintext by design for v1, with the warning printed in the flow — the file is the account, like a saved password without a master password. Passphrase protection and the OS keystore are recorded later options, not half-built now. Every operation takes its path explicitly, so tests drive scratch files and can never touch a real account. | `AccountStore` |
 | D7 | **No clobbering.** Register and import refuse when the device already holds an account file — including an unreadable one (a corrupted key must not be silently replaced). Deleting/switching is a deliberate later surface. | `AccountSession` |
-| D8 | **Terminal semantics change, flagged.** `register <name>` = create; `login` = unlock; `login <key> [name]` = import; `logout` = lock. `Terminal.IsLoggedIn` is now *derived* from the session (the §5.1 gate's input), and the old no-op `InitiatePasswordPrompt` stub is gone. | `Terminal`, `TerminalCommands` |
+| D8 | **Terminal semantics change, flagged.** `register <name>` = create; `login` = unlock; `login <key> [name]` = import (no name ⇒ the terminal prompts for one); `unregister [confirm]` = delete this device's account (the lost-key reset, pre-login); `logout` = lock. `Terminal.IsLoggedIn` is now *derived* from the session (the §5.1 gate's input), and the old no-op `InitiatePasswordPrompt` stub is gone. | `Terminal`, `TerminalCommands` |
 | D9 | **Identity is the account ID; the display name is presentation.** No authority exists to enforce global name uniqueness — names can collide across lots and are never trusted for identity; a signed profile and per-provider name registries are later, optional layers. | doc + `AccountSession` |
 | D10 | **Test mode uses the same local account.** §3.12 keys per-player data by `AccountId` from its first write; session-scoped peer ids map to the stable account at §10.1's handshake when that lands. Nothing about the account is lot state — it never enters `lot.json`. | §3.12 wiring note |
 
@@ -187,6 +204,11 @@ the in-game suite then pins the same contract under the game's own runtime on ev
   public key + a signature over `AccountChallenge.Build(lotId, nonce, expiry)`; the host verifies
   with `AccountKey.Verify` and records the peer→Account ID mapping. The primitive and its format
   are frozen by tests now; the handshake is wiring.
+* **The display name reaches a lot's scripts (`Lot.GetLocalPlayerName()`, added in the 3.12a fix
+  pass).** `BuilderScene.LocalPlayerName` reads it from the stored account (presentation only, `""`
+  for a guest) and `LotLuaApi` exposes it beside `GetLocalPlayer()`. This is the local half only:
+  showing a name to *other* players still needs §10.1 to carry it, so the name is currently for
+  nameplates/welcome lines a local script draws, never an identity claim.
 * **§10.9** — the identity model line: session-scoped peer ids remain the transport view; the stable
   Account ID is mapped onto them at the handshake.
 * **§3.12** — per-player data keyed by `AccountId`; the data subserver verifies signed intents with

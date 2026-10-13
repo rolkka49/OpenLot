@@ -292,6 +292,72 @@ public sealed class TransformCommand : IEditorCommand
 }
 
 /// <summary>
+/// A transform edit over a whole selection (the multi-object gizmo): one history entry for every
+/// member, so a group Move/Rotate/Scale is a single Ctrl+Z that restores all of it — positions,
+/// rotations and (for the sized parts) the authored sizes together. The caller only adds members
+/// that actually changed, so the label's count matches what moved.
+///
+/// Per member the storage shape is exactly <see cref="TransformCommand"/>'s: the whole local
+/// transform, plus the authored size where the member has one.
+/// </summary>
+public sealed class TransformNodesCommand : IEditorCommand
+{
+	private readonly List<Node3D> _nodes = new List<Node3D>();
+	private readonly List<Transform3D> _before = new List<Transform3D>();
+	private readonly List<Transform3D> _after = new List<Transform3D>();
+	private readonly List<LotObject> _sized = new List<LotObject>();
+	private readonly List<Vector3> _sizeBefore = new List<Vector3>();
+	private readonly List<Vector3> _sizeAfter = new List<Vector3>();
+	public string Label { get; private set; }
+
+	public TransformNodesCommand()
+	{
+		Label = "Transform";
+	}
+
+	/// <summary>How many members the entry covers.</summary>
+	public int Count { get { return _nodes.Count; } }
+
+	public void Add(Node3D node, Transform3D before, Transform3D after,
+		LotObject sized, Vector3 sizeBefore, Vector3 sizeAfter)
+	{
+		if (node == null) return;
+		_nodes.Add(node);
+		_before.Add(before);
+		_after.Add(after);
+		_sized.Add(sized);
+		_sizeBefore.Add(sizeBefore);
+		_sizeAfter.Add(sizeAfter);
+	}
+
+	/// <summary>
+	/// Names the entry after what it did and how many members it touched, in the same style as
+	/// <see cref="DeleteNodesCommand"/> ("Move 3 Objects" / "Move"). Called before the push.
+	/// </summary>
+	public void FinishLabel(string verb)
+	{
+		string name = string.IsNullOrEmpty(verb) ? "Transform" : verb;
+		Label = _nodes.Count > 1 ? name + " " + _nodes.Count + " Objects" : name;
+	}
+
+	public void Redo(Builder builder) { Apply(_after, _sizeAfter); }
+	public void Undo(Builder builder) { Apply(_before, _sizeBefore); }
+	public void Discard(Builder builder) { }
+
+	private void Apply(List<Transform3D> transforms, List<Vector3> sizes)
+	{
+		for (int i = 0; i < _nodes.Count; i++)
+		{
+			Node3D node = _nodes[i];
+			if (node == null || !GodotObject.IsInstanceValid(node)) continue;
+			node.Transform = transforms[i];
+			LotObject sized = _sized[i];
+			if (sized != null && GodotObject.IsInstanceValid(sized)) sized.SetSize(sizes[i]);
+		}
+	}
+}
+
+/// <summary>
 /// Attaches a node that was created detached. Undo detaches it again but keeps it alive, so redo
 /// re-attaches the SAME node (names, children and handles stay stable across undo/redo). The node
 /// is freed only when the command is permanently dropped while detached.
@@ -334,40 +400,75 @@ public sealed class CreateNodeCommand : IEditorCommand
 }
 
 /// <summary>
-/// Deletes a node by detaching it (not freeing it), so undo can put it back exactly where it was —
-/// same node, same index, same handles. The node is freed when the command is dropped while the
-/// deletion is still in effect.
+/// Deletes one or more nodes by detaching them (not freeing them), so one undo puts the whole set
+/// back exactly where it was — same nodes, same indices, same handles. This is the editor's only
+/// delete path: a single delete is a one-node set, so the Delete key and the hierarchy's context
+/// menu cannot drift apart.
+///
+/// The set is stored in ascending (parent, index) order, which is what makes the undo exact: a node
+/// is re-attached with its later siblings already in place, so each insertion pushes them right to
+/// where they belong. A node whose ancestor is also in the set is dropped by the caller (detaching
+/// the ancestor takes the subtree whole). Each node is freed when the command leaves the history
+/// while the deletion is still in effect.
 /// </summary>
-public sealed class DeleteNodeCommand : IEditorCommand
+public sealed class DeleteNodesCommand : IEditorCommand
 {
-	private readonly Node _node;
-	private readonly Node _parent;
-	private readonly int _index;
+	private readonly List<Node> _nodes = new List<Node>();
+	private readonly List<Node> _parents = new List<Node>();
+	private readonly List<int> _indices = new List<int>();
 	public string Label { get; private set; }
 
-	public DeleteNodeCommand(Node node, Node parent, int index)
+	public DeleteNodesCommand(IReadOnlyList<Node> nodes)
 	{
-		Label = "Delete";
-		_node = node;
-		_parent = parent;
-		_index = index;
+		for (int i = 0; i < nodes.Count; i++)
+		{
+			Node node = nodes[i];
+			if (node == null || !GodotObject.IsInstanceValid(node)) continue;
+			Node parent = node.GetParent();
+			if (parent == null) continue;
+			int index = node.GetIndex();
+			// Insertion sort into (parent, index) order — a handful of nodes, and the ordering is
+			// load-bearing for Undo, not just cosmetic.
+			int at = _nodes.Count;
+			while (at > 0 && Compare(_parents[at - 1], _indices[at - 1], parent, index) > 0) at--;
+			_nodes.Insert(at, node);
+			_parents.Insert(at, parent);
+			_indices.Insert(at, index);
+		}
+		Label = _nodes.Count > 1 ? "Delete " + _nodes.Count + " Objects" : "Delete";
+	}
+
+	/// <summary>Parent identity first, then index — the order Undo needs to land every node back.</summary>
+	private static int Compare(Node parentA, int indexA, Node parentB, int indexB)
+	{
+		if (parentA == parentB) return indexA.CompareTo(indexB);
+		return parentA.GetInstanceId().CompareTo(parentB.GetInstanceId());
 	}
 
 	public void Redo(Builder builder)
 	{
-		EditTreeOps.Detach(_node);
-		if (builder.Selection != null && EditTreeOps.IsLive(_node)) builder.Selection.Deselect(_node);
+		// Later siblings come out first, so detaching one never invalidates another's recorded index.
+		for (int i = _nodes.Count - 1; i >= 0; i--)
+		{
+			Node node = _nodes[i];
+			EditTreeOps.Detach(node);
+			if (builder.Selection != null && EditTreeOps.IsLive(node)) builder.Selection.Deselect(node);
+		}
 	}
 
 	public void Undo(Builder builder)
 	{
-		EditTreeOps.Attach(_node, _parent, _index);
+		for (int i = 0; i < _nodes.Count; i++) EditTreeOps.Attach(_nodes[i], _parents[i], _indices[i]);
 	}
 
 	public void Discard(Builder builder)
 	{
-		if (!EditTreeOps.IsLive(_node)) return;
-		if (_node.GetParent() == null && builder.Scene != null) builder.Scene.DestroyEntity(_node);
+		for (int i = 0; i < _nodes.Count; i++)
+		{
+			Node node = _nodes[i];
+			if (!EditTreeOps.IsLive(node)) continue;
+			if (node.GetParent() == null && builder.Scene != null) builder.Scene.DestroyEntity(node);
+		}
 	}
 }
 

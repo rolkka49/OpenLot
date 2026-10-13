@@ -22,6 +22,7 @@ public static class LotLogSelfTest
 		TestEntryFields();
 		TestScriptOutput();
 		TestConsoleScrollback();
+		TestConsoleSelection();
 
 		// Leave the sink empty: the suites around this one log real warnings, and a creator opening
 		// the Output window should not see this suite's scratch entries.
@@ -133,8 +134,90 @@ public static class LotLogSelfTest
 			ring.At(ring.Count - 1).Text == "c" + (ConsoleScrollback.Capacity + 5));
 		Check("scrollback: colors are baked per line", ring.At(0).Color == color);
 
+		// The copy payload (the terminal's Ctrl+Shift+C / context-menu "copy all"): one
+		// newline-joined string over the whole ring, oldest first.
+		string[] joinedLines = ring.ToText().Split('\n');
+		Check("scrollback: ToText joins every line with newlines",
+			joinedLines.Length == ConsoleScrollback.Capacity &&
+			joinedLines[0] == "c6" && joinedLines[1] == "c7" &&
+			joinedLines[joinedLines.Length - 1] == "c" + (ConsoleScrollback.Capacity + 5));
+
+		// Absolute ids (the selection addresses lines by these so the ring dropping its front
+		// cannot shift what is selected). c1 is id 0, so the oldest held line (c6) is BaseId.
+		Check("scrollback: TotalAdded counts every add", ring.TotalAdded == ConsoleScrollback.Capacity + 5);
+		Check("scrollback: BaseId is the oldest held line's absolute id",
+			ring.BaseId == ring.TotalAdded - ring.Count && ring.BaseId == 5);
+		Check("scrollback: TryGetAbsolute resolves a held line",
+			ring.TryGetAbsolute(ring.BaseId, out ConsoleScrollback.Line oldest) && oldest.Text == "c6");
+		Check("scrollback: TryGetAbsolute refuses a dropped line", !ring.TryGetAbsolute(4, out ConsoleScrollback.Line _));
+		Check("scrollback: TryGetAbsolute resolves the newest line",
+			ring.TryGetAbsolute(ring.TotalAdded - 1, out ConsoleScrollback.Line newest) &&
+			newest.Text == "c" + (ConsoleScrollback.Capacity + 5));
+
 		ring.Clear();
 		Check("scrollback: Clear empties it", ring.Count == 0);
+		Check("scrollback: ToText of an empty ring is the empty string", ring.ToText() == "");
+	}
+
+	/// <summary>
+	/// The selection model behind the terminal's drag-select: range ordering (either drag
+	/// direction), the character snap rule, and the copy text. Pure, so it pins without an ImGui frame —
+	/// the draw and input halves in Terminal are eye-checked, the project's usual split.
+	/// </summary>
+	private static void TestConsoleSelection()
+	{
+		ConsoleSelection selection = new ConsoleSelection();
+		Check("selection: a fresh selection is empty", !selection.Active && !selection.HasRange);
+
+		selection.Begin(10, 3);
+		Check("selection: Begin anchors and focuses one point", selection.Active && !selection.HasRange);
+		selection.Extend(12, 4);
+		Check("selection: a drag creates a range", selection.HasRange);
+
+		selection.Ordered(out long startLine, out int startChar, out long endLine, out int endChar);
+		Check("selection: a forward drag orders front-to-back",
+			startLine == 10 && startChar == 3 && endLine == 12 && endChar == 4);
+
+		// A backward drag reports the same ordered range.
+		selection.Begin(12, 4);
+		selection.Extend(10, 3);
+		selection.Ordered(out startLine, out startChar, out endLine, out endChar);
+		Check("selection: a backward drag orders the same way",
+			startLine == 10 && startChar == 3 && endLine == 12 && endChar == 4);
+
+		selection.Clear();
+		Check("selection: Clear empties it", !selection.Active && !selection.HasRange);
+
+		// --- the row-from-offset rule ---
+		// The console's origin is the absolute position its first line is drawn at, so it already
+		// carries the window's scroll and no scroll term belongs in this mapping (getting that wrong
+		// is what made a selection impossible to start on a scrolled console).
+		Check("selection: the first row starts at the origin", ConsoleSelection.LineAt(0f, 10f, 5) == 0);
+		Check("selection: part-way into a row is still that row", ConsoleSelection.LineAt(4f, 10f, 5) == 0);
+		Check("selection: one step down is the second row", ConsoleSelection.LineAt(10f, 10f, 5) == 1);
+		Check("selection: the row is clamped into the log at both ends",
+			ConsoleSelection.LineAt(-500f, 10f, 5) == 0 && ConsoleSelection.LineAt(999f, 10f, 5) == 4);
+		Check("selection: an empty log or a zero step has no row",
+			ConsoleSelection.LineAt(5f, 10f, 0) == -1 && ConsoleSelection.LineAt(5f, 0f, 5) == -1);
+
+		// --- the character snap rule (boundaries at 0, 5, 12 for a 2-char line) ---
+		float[] offsets = { 0f, 5f, 12f };
+		Check("selection: before the line start is char 0", ConsoleSelection.NearestCharacter(-3f, offsets) == 0);
+		Check("selection: left of a character's midpoint snaps left", ConsoleSelection.NearestCharacter(2f, offsets) == 0);
+		Check("selection: past a character's midpoint snaps right", ConsoleSelection.NearestCharacter(3f, offsets) == 1);
+		Check("selection: past the line end is the last boundary", ConsoleSelection.NearestCharacter(99f, offsets) == 2);
+
+		// --- the copy text ---
+		string[] lines = { "alpha", "bravo", "charlie", "delta" };
+		string mid = ConsoleSelection.BuildText(1, 2, 3, 3, id => id >= 0 && id < lines.Length ? lines[(int)id] : "");
+		Check("selection: a multi-line copy slices the ends and keeps whole lines between (" +
+			mid.Replace("\n", "\\n") + ")", mid == "avo\ncharlie\ndel");
+		Check("selection: a single-line copy is a slice",
+			ConsoleSelection.BuildText(2, 0, 2, 4, id => lines[(int)id]) == "char");
+		Check("selection: a dropped line copies as empty",
+			ConsoleSelection.BuildText(1, 0, 2, 3, id => id == 1 ? lines[1] : "") == "bravo\n");
+		Check("selection: an inverted range copies nothing",
+			ConsoleSelection.BuildText(5, 0, 1, 0, id => "x") == "");
 	}
 
 	private static void Check(string label, bool ok)

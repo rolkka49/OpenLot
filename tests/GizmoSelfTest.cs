@@ -1260,6 +1260,142 @@ public static class GizmoSelfTest
 		GD.Print("[GizmoSelfTest] physics drag: " + _checks + " checks, " + _failures + " failure(s).");
 	}
 
+	/// <summary>
+	/// The multi-object gizmo's selection rules and group math (the follow-up to milestone 2.2's
+	/// single-object tools): which nodes join the group, the pivot they share, and the three
+	/// absolute group operations with hand-computed numbers.
+	///
+	/// The fixture is a detached tree, like the other pure suites: the group only needs a root and
+	/// a selection, and every expectation below is arithmetic a reader can repeat.
+	/// </summary>
+	private static void TestGizmoSelectionGroup(Node3D root)
+	{
+		LotObject left = LotObject.Create(LotObjectKind.Cube, "GroupLeft", new Color(1f, 1f, 1f));
+		left.Position = new Vector3(-2f, 0f, 0f);
+		root.AddChild(left);
+		LotObject right = LotObject.Create(LotObjectKind.Cube, "GroupRight", new Color(1f, 1f, 1f));
+		right.Position = new Vector3(2f, 0f, 0f);
+		root.AddChild(right);
+
+		SelectionManager selection = new SelectionManager();
+		GizmoSelectionGroup group = new GizmoSelectionGroup();
+
+		// --- membership ---
+		selection.Select(left, false);
+		selection.Select(right, true);
+		group.Resolve(selection, root);
+		Check("group: two selected parts resolve to two members", group.Count == 2 && group.IsGroup);
+		Check("group: a group has no single target", group.Single == null);
+		CheckVec("group: the pivot is the average of the members' centres", group.LiveCenter(), Vector3.Zero);
+
+		LotObject child = LotObject.Create(LotObjectKind.Sphere, "GroupChild", new Color(1f, 1f, 1f));
+		child.Position = new Vector3(0f, 1f, 0f);
+		left.AddChild(child);
+		selection.Select(child, true);
+		group.Resolve(selection, root);
+		Check("group: a selected child of a selected parent is skipped (the parent carries it)", group.Count == 2);
+
+		LotObject decal = LotObject.Create(LotObjectKind.Decal, "GroupDecal", new Color(1f, 1f, 1f));
+		left.AddChild(decal);
+		selection.ClearSelection();
+		selection.Select(decal, false);
+		group.Resolve(selection, root);
+		Check("group: a decal never joins (its transform is derived)", group.Count == 0);
+
+		selection.Select(left.MeshInstance, false);
+		group.Resolve(selection, root);
+		Check("group: an internal child is skipped", group.Count == 0);
+
+		// A mesh-less group node takes its centre from the parts under it.
+		Node3D wrap = new Node3D();
+		wrap.Name = "GroupWrap";
+		root.AddChild(wrap);
+		LotObject wrapped = LotObject.Create(LotObjectKind.Cube, "GroupWrapped", new Color(1f, 1f, 1f));
+		wrapped.Position = new Vector3(5f, 0f, 0f);
+		wrap.AddChild(wrapped);
+		CheckVec("group: a model group's centre comes from the parts under it",
+			GizmoSelectionGroup.MemberCentre(wrap), new Vector3(5f, 0f, 0f));
+
+		// --- move ---
+		selection.Select(left, false);
+		selection.Select(right, true);
+		group.Resolve(selection, root);
+		group.Capture();
+		group.ApplyTranslate(new Vector3(1f, 2f, 3f));
+		CheckVec("group move: the first member moves by the offset", left.Position, new Vector3(-1f, 2f, 3f));
+		CheckVec("group move: the second member moves by the same offset", right.Position, new Vector3(3f, 2f, 3f));
+		CheckVec("group move: a child of a member rides along", child.GlobalPosition, new Vector3(-1f, 3f, 3f));
+		// Absolute from the capture: re-applying the same offset must not move anything further.
+		group.ApplyTranslate(new Vector3(1f, 2f, 3f));
+		CheckVec("group move: the result is absolute, never accumulated", left.Position, new Vector3(-1f, 2f, 3f));
+
+		// --- rotate (about the captured pivot, +90 degrees about world Y) ---
+		left.Position = new Vector3(-2f, 0f, 0f);
+		right.Position = new Vector3(2f, 0f, 0f);
+		group.Capture();
+		float radius = left.Position.Length();
+		group.ApplyRotate(new Basis(Vector3.Up, Mathf.Pi * 0.5f));
+		// Right-handed rotation about +Y: (x, y, z) -> (z, y, -x). The members start on +/-X and the
+		// pivot is the origin here, so they land on +/-Z — with the sign that makes it a rotation
+		// rather than a mirror.
+		CheckVec("group rotate: the first member orbits the pivot", left.Position, new Vector3(0f, 0f, 2f));
+		CheckVec("group rotate: the second member orbits the pivot", right.Position, new Vector3(0f, 0f, -2f));
+		CheckNear("group rotate: the orbit radius is preserved", left.Position.Length(), radius);
+		Check("group rotate: a member's orientation is rotated with the group",
+			left.GlobalTransform.Basis.IsEqualApprox(new Basis(Vector3.Up, Mathf.Pi * 0.5f)));
+		CheckVec("group rotate: the members' centroid stays on the pivot", group.LiveCenter(), Vector3.Zero);
+
+		// --- uniform scale ---
+		left.Position = new Vector3(-2f, 0f, 0f);
+		right.Position = new Vector3(2f, 0f, 0f);
+		left.Rotation = Vector3.Zero;
+		right.Rotation = Vector3.Zero;
+		LotObject capsule = LotObject.Create(LotObjectKind.Capsule, "GroupCapsule", new Color(1f, 1f, 1f));
+		capsule.Position = new Vector3(0f, 0f, 4f);
+		root.AddChild(capsule);
+		selection.Select(left, false);
+		selection.Select(capsule, true);
+		group.Resolve(selection, root);
+		CheckVec("group scale: the pivot averages the selected members only", group.LiveCenter(), new Vector3(-1f, 0f, 2f));
+
+		group.Capture();
+		group.ApplyUniformScale(2f);
+		// pivot (-1,0,2): left offset (-1,0,-2) -> doubled (-2,0,-4) -> (-3,0,-2);
+		// capsule offset (1,0,2) -> doubled (2,0,4) -> (1,0,6).
+		CheckVec("group scale: the first member moves away from the pivot", left.Position, new Vector3(-3f, 0f, -2f));
+		CheckVec("group scale: the second member moves away from the pivot", capsule.Position, new Vector3(1f, 0f, 6f));
+		CheckVec("group scale: a sized member's authored Size is scaled", left.Size, new Vector3(2f, 2f, 2f));
+		CheckVec("group scale: a member without an authored size scales its node uniformly",
+			capsule.Scale, new Vector3(2f, 2f, 2f));
+		Check("group scale: the node scale is uniform, so proportions are kept",
+			Mathf.IsEqualApprox(capsule.Scale.X, capsule.Scale.Y)
+			&& Mathf.IsEqualApprox(capsule.Scale.Y, capsule.Scale.Z));
+	}
+
+	/// <summary>
+	/// Runs the group suite with a scratch root that is INSIDE the tree (see
+	/// <see cref="TestGizmoSelectionGroup"/>): Godot only defines a node's world transform when it
+	/// is, and the group's math is world-space. The fixture hangs off the scene — not the lot — and
+	/// is invisible, so no walk, save or render can see it. Called from BuilderScene._Process,
+	/// where adding a child is allowed (during _Ready the root window is still being built).
+	/// </summary>
+	public static void RunSelectionGroup(BuilderScene scene)
+	{
+		if (scene == null) return;
+		_failures = 0;
+		_checks = 0;
+
+		Node3D scratch = new Node3D();
+		scratch.Name = "GizmoGroupScratch";
+		scratch.Visible = false;
+		scene.AddChild(scratch);
+
+		TestGizmoSelectionGroup(scratch);
+
+		scratch.Free();
+		GD.Print("[GizmoSelfTest] selection group: " + _checks + " checks, " + _failures + " failure(s).");
+	}
+
 	/// <summary>No-op IGizmoDraw so the behaviors can be exercised without ImGui.</summary>
 	private sealed class GizmoSelfTestDraw : IGizmoDraw
 	{

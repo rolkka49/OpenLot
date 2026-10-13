@@ -200,9 +200,9 @@ public static class LotConstraints
 	/// <summary>
 	/// Replaces the whole table with a snapshot (the test-mode exit path, §3.6): a session's Lua
 	/// edits to the table are undone, and records the session deleted come back. Records whose
-	/// parts no longer exist are dropped — a session-spawned part died in the exit reload and its
-	/// replica carries a new handle, so such a link cannot be re-bound (the same rule the reload
-	/// cleanup already applies).
+	/// parts no longer exist are dropped — a session-spawned part was removed with the session and
+	/// its successor is a different entity, so such a link cannot be re-bound (the same rule the
+	/// reload cleanup already applies).
 	/// </summary>
 	public static void RestoreRecords(IReadOnlyList<LotConstraintRecord> snapshot, Func<int, bool> handleExists)
 	{

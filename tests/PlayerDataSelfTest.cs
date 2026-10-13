@@ -337,6 +337,12 @@ public static class PlayerDataSelfTest
 		Check("verbs: the local player id is a valid shape (" + me + ")", PlayerDataStore.LooksLikePlayerId(me));
 		Check("verbs: GetLocalPlayer agrees with the scene", scene.Api.GetLocalPlayer() == me);
 
+		// The display name is presentation (milestone 3.12a's fix): it may be "" on a machine with
+		// no account, so pin the wiring, not a value — the verb must agree with the scene the same
+		// way the id does.
+		Check("verbs: GetLocalPlayerName agrees with the scene",
+			scene.Api.GetLocalPlayerName() == scene.LocalPlayerName);
+
 		Check("verbs: SetPlayerValue stores a number", scene.Api.SetPlayerValue(me, "coins", 50d));
 		Check("verbs: GetPlayerValue reads it back", scene.Api.GetPlayerValue(me, "coins") is double coins && coins == 50d);
 		Check("verbs: a string value round-trips", scene.Api.SetPlayerValue(me, "name", "Ada") &&

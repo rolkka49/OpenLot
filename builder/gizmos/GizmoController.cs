@@ -37,6 +37,8 @@ public sealed class GizmoController
 	private readonly Builder _builder;
 	private readonly GizmoAppData _appData = new GizmoAppData();
 	private readonly GizmoContext _context;
+	/// <summary>The selection the gizmo acts on (reused, so a visible gizmo allocates nothing).</summary>
+	private readonly GizmoSelectionGroup _group = new GizmoSelectionGroup();
 
 	/// <summary>Last tool mode seen, so a mid-hover tool switch can drop the stale handle state.</summary>
 	private GizmoMode _lastMode = GizmoMode.Select;
@@ -50,6 +52,12 @@ public sealed class GizmoController
 	// untouched), so the open entry also records the size it started from.
 	private LotObject _dragSized;
 	private Vector3 _dragBeforeSize;
+	// Multi-object drag (two or more selected objects): the whole set becomes ONE history entry
+	// and the start state lives in _group (see GizmoSelectionGroup.Capture). _dragGroup marks that
+	// the open entry is a group one; _groupDrag is true from the first applied frame until release
+	// (it gates both the rolling capture and the group apply).
+	private bool _dragGroup;
+	private bool _groupDrag;
 
 	// Face scale drag state (milestone 2.7). Owned here rather than in GizmoContext so the context
 	// keeps its Im3d shape; the handle ids still live in the shared state machine.
@@ -95,6 +103,9 @@ public sealed class GizmoController
 		// move the user already made is undoable.
 		if (_wasDragging) CommitGizmoDrag();
 		_wasDragging = false;
+		_dragGroup = false;
+		_groupDrag = false;
+		_group.ClearCapture();
 		_faceDrag.Captured = false;
 		_context.ResetId();
 		WantsMouse = false;
@@ -129,15 +140,14 @@ public sealed class GizmoController
 			_lastMode = mode;
 		}
 
-		Node3D target = _builder.Selection.GetFirstValid() as Node3D;
-		// A decal's transform is derived from its face/offset/scale against the host, so a gizmo
-		// drag would be overwritten on the next refresh. A selected decal therefore shows no
-		// gizmo; it is dragged directly on the host's face instead (PartDragController).
-		if (target is LotObject lotTarget && lotTarget.Kind == LotObjectKind.Decal)
-		{
-			target = null;
-		}
-		if (target == null || (mode != GizmoMode.Translate && mode != GizmoMode.Rotate && mode != GizmoMode.Scale))
+		// The gizmo acts on the effective selection (GizmoSelectionGroup): one member keeps the
+		// single-target behaviour exactly, two or more become a group transform around the shared
+		// pivot. A decal is filtered out there — its transform is derived from its face/offset/
+		// scale against the host, so a gizmo drag would be overwritten on the next refresh; it is
+		// dragged directly on the host's face instead (PartDragController).
+		_group.Resolve(_builder.Selection, _builder.Scene.LotRoot);
+		bool toolActive = mode == GizmoMode.Translate || mode == GizmoMode.Rotate || mode == GizmoMode.Scale;
+		if (_group.Count == 0 || !toolActive)
 		{
 			// No gizmo this frame: drop hover state so a stale hot handle cannot survive the
 			// selection or the tool mode changing underneath it.
@@ -156,15 +166,24 @@ public sealed class GizmoController
 		FillAppData(camera, viewportSize, imageOrigin, imageSize);
 
 		ImGuiGizmoDraw draw = new ImGuiGizmoDraw(camera, imageOrigin, imageSize, viewportSize);
-		RunGizmo(target, mode, draw);
+		if (_group.IsGroup)
+		{
+			// Two or more members: one shared pivot, one undo entry for the whole set.
+			RunGroupGizmo(mode, draw);
+		}
+		else
+		{
+			RunSingleGizmo(_group.Single, mode, draw);
+		}
 	}
 
 	/// <summary>
-	/// Im3d::Gizmo (im3d.cpp:1332) dispatch: switches on the active tool, decomposes the target's
-	/// transform into the piece the tool works on, runs that gizmo, and recomposes. The port works
-	/// on Godot's Transform3D directly rather than a float[4*4].
+	/// Im3d::Gizmo (im3d.cpp:1332) dispatch for a SINGLE target: switches on the active tool,
+	/// decomposes the target's transform into the piece the tool works on, runs that gizmo, and
+	/// recomposes. The port works on Godot's Transform3D directly rather than a float[4*4].
+	/// A multi-object selection does not come here — see <see cref="RunGroupGizmo"/>.
 	/// </summary>
-	private void RunGizmo(Node3D target, GizmoMode mode, IGizmoDraw draw)
+	private void RunSingleGizmo(Node3D target, GizmoMode mode, IGizmoDraw draw)
 	{
 		Transform3D transform = target.GlobalTransform;
 		bool changed;
@@ -174,7 +193,7 @@ public sealed class GizmoController
 			{
 				// Im3d: Mat3 rotation = outMat4->getRotation(); GizmoRotation(...); setRotation(...)
 				Basis rotation = GizmoMath.GetRotation(transform.Basis);
-				changed = RunRotationGizmo(target, ref rotation, draw);
+				changed = RunRotationGizmo(transform.Origin, ref rotation, draw);
 				if (changed)
 				{
 					target.GlobalTransform = new Transform3D(GizmoMath.SetRotation(transform.Basis, rotation), transform.Origin);
@@ -188,6 +207,7 @@ public sealed class GizmoController
 				// opposite face anchored — so the origin travels with the scale here.
 				Vector3 position = transform.Origin;
 				LotObject sized = target as LotObject;
+				Mesh mesh = sized != null && sized.MeshInstance != null ? sized.MeshInstance.Mesh : null;
 				if (sized != null && sized.HasSize)
 				{
 					// A sized part (cube/sphere/cylinder/wedge) resizes through its authored Size:
@@ -195,7 +215,7 @@ public sealed class GizmoController
 					// fixed and the node scale stays 1. The face handles measure the live mesh's
 					// half extents, so the very same drag math reads the part's actual faces.
 					Vector3 size = sized.Size;
-					changed = RunScaleGizmo(target, ref size, ref position, draw, true);
+					changed = RunScaleGizmo(transform.Origin, transform, mesh, ref size, ref position, draw, true);
 					if (changed)
 					{
 						sized.SetSize(size);
@@ -205,7 +225,7 @@ public sealed class GizmoController
 				else
 				{
 					Vector3 scale = GizmoMath.GetScale(transform.Basis);
-					changed = RunScaleGizmo(target, ref scale, ref position, draw);
+					changed = RunScaleGizmo(transform.Origin, transform, mesh, ref scale, ref position, draw);
 					if (changed)
 					{
 						target.GlobalTransform = new Transform3D(GizmoMath.SetScale(transform.Basis, scale), position);
@@ -214,20 +234,106 @@ public sealed class GizmoController
 				break;
 			}
 			default:
-				changed = RunTranslationGizmo(target, draw);
+			{
+				Vector3 position = transform.Origin;
+				changed = RunTranslationGizmo(transform.Origin, ref position, draw);
+				if (changed)
+				{
+					target.GlobalPosition = position;
+				}
 				break;
+			}
 		}
 
-		// The history hook must also see the frame a drag ENDS on: the release frame reports no
-		// change (the handle deactivates), and gating this on `changed` alone left the entry
-		// uncommitted until some later selection/tool change — which folded a following drag into
-		// the previous entry. `_wasDragging` is true exactly while an entry is open, so this call
-		// runs once more on the release frame and the commit lands where it belongs.
+		FinishFrame(changed, mode);
+	}
+
+	/// <summary>
+	/// The same three tools over a whole selection, around the group pivot (the average of the
+	/// members' centres — see <see cref="GizmoSelectionGroup.LiveCenter"/>).
+	///
+	/// Move translates every member by the pivot's offset. Rotate pre-multiplies every member's
+	/// orientation by the world rotation and orbits its centre around the pivot captured at the
+	/// drag's start. Scale is UNIFORM only — the centre dot is the only handle drawn — because a
+	/// per-axis group scale would distort each object's proportions: members keep their own shape
+	/// and only their distance from the pivot changes. That restriction is group-only by design; a
+	/// single selected object keeps its per-axis and per-face handles.
+	///
+	/// The start state is (re)captured on every idle frame, so the capture the first drag frame
+	/// needs is already there — no press-frame ordering hazard — and every apply is absolute from
+	/// that capture rather than accumulated (the §2.7 drift lesson).
+	/// </summary>
+	private void RunGroupGizmo(GizmoMode mode, IGizmoDraw draw)
+	{
+		if (!_groupDrag) _group.Capture();
+
+		Vector3 pivot = _group.Pivot;
+		bool changed = false;
+
+		switch (mode)
+		{
+			case GizmoMode.Rotate:
+			{
+				Basis rotation = Basis.Identity;
+				changed = RunRotationGizmo(pivot, ref rotation, draw);
+				if (changed)
+				{
+					_groupDrag = true;
+					_group.ApplyRotate(rotation);
+				}
+				break;
+			}
+			case GizmoMode.Scale:
+			{
+				Vector3 scale = Vector3.One;
+				Vector3 position = pivot;
+				changed = RunScaleGizmo(pivot, new Transform3D(Basis.Identity, pivot), null,
+					ref scale, ref position, draw, false, true);
+				if (changed)
+				{
+					_groupDrag = true;
+					// The uniform handle reports the absolute scale it grew to from the value
+					// captured at activation, so the factor is that value as-is — never a per-frame
+					// delta added to the live one.
+					_group.ApplyUniformScale(scale.X);
+				}
+				break;
+			}
+			default:
+			{
+				// Handles are drawn at the members' LIVE centroid so the gizmo travels with the
+				// objects (Im3d's own single-target behaviour); the result the behaviour reports is
+				// absolute from the press, so the offset is measured against the captured pivot.
+				Vector3 live = _group.LiveCenter();
+				Vector3 position = live;
+				changed = RunTranslationGizmo(live, ref position, draw);
+				if (changed)
+				{
+					_groupDrag = true;
+					_group.ApplyTranslate(position - pivot);
+				}
+				break;
+			}
+		}
+
+		FinishFrame(changed, mode);
+	}
+
+	/// <summary>
+	/// The shared tail of both gizmo paths. The history hook must also see the frame a drag ENDS
+	/// on: the release frame reports no change (the handle deactivates), and gating this on
+	/// `changed` alone left the entry uncommitted until some later selection/tool change — which
+	/// folded a following drag into the previous entry. `_wasDragging` is true exactly while an
+	/// entry is open, so this call runs once more on the release frame and the commit lands where
+	/// it belongs.
+	/// </summary>
+	private void FinishFrame(bool changed, GizmoMode mode)
+	{
 		if (changed || _wasDragging)
 		{
-			// No MarkDirty during the drag: the commit below records one command when the drag ends,
-			// so undoing back to the save point can report the lot clean again.
-			UpdateDragHistory(target, mode);
+			// No MarkDirty during the drag: the commit below records one command when the drag
+			// ends, so undoing back to the save point can report the lot clean again.
+			UpdateDragHistory(mode);
 		}
 	}
 
@@ -235,19 +341,31 @@ public sealed class GizmoController
 	/// Opens an undo entry when a handle becomes active and closes it when the drag ends, so the
 	/// whole drag is one history entry instead of one per frame.
 	/// </summary>
-	private void UpdateDragHistory(Node3D target, GizmoMode mode)
+	private void UpdateDragHistory(GizmoMode mode)
 	{
 		bool dragging = _context.ActiveId != GizmoContext.IdInvalid;
 		if (dragging && !_wasDragging)
 		{
-			_dragTarget = target;
-			_dragBefore = target.Transform;
 			_dragMode = mode;
-			// A sized part's Scale drag writes its authored Size rather than the node basis (see
-			// the Scale case), so the entry must record where that size started.
-			LotObject sized = target as LotObject;
-			_dragSized = sized != null && sized.HasSize ? sized : null;
-			_dragBeforeSize = _dragSized != null ? _dragSized.Size : Vector3.One;
+			_dragGroup = _group.IsGroup;
+			if (_dragGroup)
+			{
+				// The group's start state is already captured: RunGroupGizmo snapped it on the last
+				// idle frame, which is the state just before the first applied frame.
+				_dragTarget = null;
+				_dragSized = null;
+			}
+			else
+			{
+				Node3D target = _group.Single;
+				_dragTarget = target;
+				_dragBefore = target != null ? target.Transform : Transform3D.Identity;
+				// A sized part's Scale drag writes its authored Size rather than the node basis
+				// (see the Scale case), so the entry must record where that size started.
+				LotObject sized = target as LotObject;
+				_dragSized = sized != null && sized.HasSize ? sized : null;
+				_dragBeforeSize = _dragSized != null ? _dragSized.Size : Vector3.One;
+			}
 		}
 		else if (!dragging && _wasDragging)
 		{
@@ -261,6 +379,13 @@ public sealed class GizmoController
 	/// whole resize — extent, mesh and the position shift together.</summary>
 	private void CommitGizmoDrag()
 	{
+		if (_dragGroup)
+		{
+			CommitGroupDrag();
+			return;
+		}
+
+		_groupDrag = false;
 		Node3D node = _dragTarget;
 		Transform3D before = _dragBefore;
 		LotObject sized = _dragSized;
@@ -278,6 +403,40 @@ public sealed class GizmoController
 			: (_dragMode == GizmoMode.Scale ? "Scale" : "Move");
 		_builder.History.Push(new TransformCommand(label, node, before, node.Transform,
 			sized, sizeBefore, sized != null ? sized.Size : sizeBefore));
+	}
+
+	/// <summary>
+	/// The group half of <see cref="CommitGizmoDrag"/>: one entry covering every member whose
+	/// transform (or authored size, for a sized part) came out different from the drag's capture,
+	/// so a multi-object Move/Rotate/Scale is a single Ctrl+Z.
+	/// </summary>
+	private void CommitGroupDrag()
+	{
+		TransformNodesCommand command = new TransformNodesCommand();
+		int count = _group.Count;
+		for (int i = 0; i < count; i++)
+		{
+			GizmoSelectionGroup.Member member = _group.GetMember(i);
+			Node3D node = member.Node;
+			if (node == null || !GodotObject.IsInstanceValid(node)) continue;
+
+			LotObject sized = member.HasSize ? member.Part : null;
+			bool transformChanged = TransformCommand.Changed(member.Before, node.Transform);
+			bool sizeChanged = sized != null && GodotObject.IsInstanceValid(sized)
+				&& TransformCommand.SizeChanged(member.BeforeSize, sized.Size);
+			if (!transformChanged && !sizeChanged) continue;
+			command.Add(node, member.Before, node.Transform, sized, member.BeforeSize,
+				sized != null ? sized.Size : member.BeforeSize);
+		}
+
+		_dragGroup = false;
+		_groupDrag = false;
+		_group.ClearCapture();
+		if (command.Count == 0) return;
+
+		command.FinishLabel(_dragMode == GizmoMode.Rotate ? "Rotate"
+			: (_dragMode == GizmoMode.Scale ? "Scale" : "Move"));
+		_builder.History.Push(command);
 	}
 
 	/// <summary>
@@ -338,10 +497,8 @@ public sealed class GizmoController
 	/// anchored to where the object was at the start of the frame and the object catches up. That
 	/// is Im3d's actual behavior, not an approximation.
 	/// </summary>
-	private bool RunTranslationGizmo(Node3D target, IGizmoDraw draw)
+	private bool RunTranslationGizmo(Vector3 drawAt, ref Vector3 outPos, IGizmoDraw draw)
 	{
-		Vector3 drawAt = target.GlobalPosition;
-		Vector3 outPos = drawAt;
 
 		float worldHeight = _context.PixelsToWorldSize(drawAt, _context.GizmoHeightPixels);
 		float planeSize = worldHeight * (0.5f * 0.5f);
@@ -475,11 +632,7 @@ public sealed class GizmoController
 			DrawDebugReadout(draw, intersects, worldHeight);
 		}
 
-		if (ret)
-		{
-			target.GlobalPosition = outPos;
-		}
-
+		// The caller writes the result: a single target onto its node, a group onto every member.
 		return ret;
 	}
 
@@ -489,9 +642,8 @@ public sealed class GizmoController
 	/// activation, so the rotation happens in world space. The local-space branch needs Im3d's
 	/// matrix stack and the toolbox has no local/global toggle yet.
 	/// </summary>
-	private bool RunRotationGizmo(Node3D target, ref Basis rotation, IGizmoDraw draw)
+	private bool RunRotationGizmo(Vector3 origin, ref Basis rotation, IGizmoDraw draw)
 	{
-		Vector3 origin = target.GlobalPosition;
 		float worldRadius = _context.PixelsToWorldSize(origin, _context.GizmoHeightPixels);
 		float worldSize = _context.PixelsToWorldSize(origin, _context.GizmoSizePixels);
 
@@ -588,19 +740,21 @@ public sealed class GizmoController
 	/// reference from the value domain (<see cref="FaceScaleMath.SizeDomainHalfPerUnit"/>), not from
 	/// the live mesh. That distinction is load-bearing — the live mesh's half grows with the part as
 	/// it is dragged, and using it made a drag on a 4-unit part shift the part while barely scaling
-	/// it (a unit part happened to cancel the error, which is why it looked fine before).</summary>
-	private bool RunScaleGizmo(Node3D target, ref Vector3 scale, ref Vector3 position, IGizmoDraw draw,
-		bool sizeDomain = false)
+	/// it (a unit part happened to cancel the error, which is why it looked fine before).
+	///
+	/// <paramref name="uniformOnly"/> is the group mode: the axis line handles are skipped, because
+	/// per-axis scaling is exactly what must not apply to a multi-object selection (it would
+	/// distort each object) — so the centre uniform dot is the whole tool, and the factor it
+	/// reports is the absolute scale the whole group grows by.</summary>
+	private bool RunScaleGizmo(Vector3 origin, Transform3D model, Mesh mesh, ref Vector3 scale,
+		ref Vector3 position, IGizmoDraw draw, bool sizeDomain = false, bool uniformOnly = false)
 	{
-		Vector3 origin = target.GlobalPosition;
 		float worldHeight = _context.PixelsToWorldSize(origin, _context.GizmoHeightPixels);
 		float worldSize = _context.PixelsToWorldSize(origin, _context.GizmoSizePixels);
 
 		// A target without a mesh (a model group) has no faces to put spheres on and keeps the Im3d
-		// axis lines; a decal never reaches the gizmo at all (its transform is derived — see Update).
-		LotObject lotTarget = target as LotObject;
-		Mesh mesh = lotTarget != null && lotTarget.MeshInstance != null ? lotTarget.MeshInstance.Mesh : null;
-		bool facesAvailable = mesh != null;
+		// axis lines. A decal never reaches the gizmo at all (its transform is derived — see Update).
+		bool facesAvailable = mesh != null && !uniformOnly;
 		Vector3 meshMin = Vector3.Zero;
 		Vector3 meshMax = Vector3.Zero;
 		if (facesAvailable)
@@ -610,7 +764,7 @@ public sealed class GizmoController
 			meshMax = bounds.End;
 		}
 
-		Basis basis = target.GlobalTransform.Basis;
+		Basis basis = model.Basis;
 		Vector3[] axes =
 		{
 			basis.X.Normalized(), // Im3d "axisX" — Normalize(ctx.getMatrix().getCol(0))
@@ -642,7 +796,7 @@ public sealed class GizmoController
 		float pickRadius = worldHeight;
 		if (facesAvailable)
 		{
-			Vector3 halfExtents = FaceScaleMath.WorldHalfExtents(meshMin, meshMax, target.GlobalTransform);
+			Vector3 halfExtents = FaceScaleMath.WorldHalfExtents(meshMin, meshMax, model);
 			pickRadius = Mathf.Max(worldHeight,
 				Mathf.Max(halfExtents.X, Mathf.Max(halfExtents.Y, halfExtents.Z)) + worldSize * 4.0f);
 		}
@@ -725,8 +879,8 @@ public sealed class GizmoController
 			for (int face = 0; face < FaceScaleMath.FaceCount; face++)
 			{
 				uint id = GizmoContext.MakeHandleId(GizmoId, FaceScaleMath.HandleId(face));
-				Vector3 centre = FaceScaleMath.WorldFaceCenter(face, meshMin, meshMax, target.GlobalTransform);
-				Vector3 normal = FaceScaleMath.WorldFaceNormal(face, target.GlobalTransform);
+				Vector3 centre = FaceScaleMath.WorldFaceCenter(face, meshMin, meshMax, model);
+				Vector3 normal = FaceScaleMath.WorldFaceNormal(face, model);
 				float handleRadius = _context.PixelsToWorldSize(centre, _context.GizmoSizePixels * 8.0f);
 
 				DrawFaceHandle(draw, id, centre, normal, face);
@@ -735,7 +889,7 @@ public sealed class GizmoController
 				{
 					int axis = FaceScaleMath.AxisForFace(face);
 					float meshHalfAxis = sizeDomain
-						? FaceScaleMath.SizeDomainHalfPerUnit(face, GizmoMath.GetScale(target.GlobalTransform.Basis))
+						? FaceScaleMath.SizeDomainHalfPerUnit(face, GizmoMath.GetScale(model.Basis))
 						: FaceScaleMath.MeshHalfAlongAxis(face, meshMin, meshMax);
 					if (FaceScaleBehavior.Apply(_context, id, face, centre, normal, origin, handleRadius,
 						scale[axis], meshHalfAxis,
@@ -750,7 +904,7 @@ public sealed class GizmoController
 				}
 			}
 		}
-		else
+		else if (!uniformOnly)
 		{
 			// Axes. Im3d passes &(*outVec3)[i]; a stack Span gives the same single-component ref
 			// without a per-frame heap allocation.

@@ -96,9 +96,9 @@ public static class LotSceneWalk
 		{
 			LotArchive.LotNodeRecord record = RecordFor(element.Kind.ToString(), node, parentIndex);
 			record.Color = element.Color;
-			// The label and visibility ride in the property bag so every record keeps one shape
-			// instead of the format gaining a field per UI kind.
-			record.Properties["label"] = element.Label ?? "";
+			// Visibility has no descriptor (the Inspector's pinned Active checkbox owns it), so it is
+			// written here. The label rides the declared "label" property below (milestone 5.3), so
+			// there is one writer for it, not two.
 			record.Properties["visible"] = element.Visible;
 			CaptureProperties(node, record);
 			return record;

@@ -63,10 +63,12 @@ public static class HierarchyDrop
 		bool targetIsUi = target is LotUIElement;
 		if (sourceIsUi != targetIsUi) return false;
 
-		// Lot UI is flat (the renderer draws direct children only), and a decal is a leaf image
-		// patch, so "into" becomes "after" for both: neither accepts children.
+		// Lot UI is flat (the renderer draws direct children only) EXCEPT a scroll container, whose
+		// contents are its children (milestone 5.3). A decal is a leaf image patch. "Into" becomes
+		// "after" for everything else.
 		bool targetIsDecal = target is LotObject targetPart && targetPart.Kind == LotObjectKind.Decal;
-		bool acceptsChildren = !targetIsUi && !targetIsDecal;
+		bool targetIsUiContainer = target is LotUIElement targetUi && targetUi.Kind == LotUIKind.ScrollContainer;
+		bool acceptsChildren = targetIsUiContainer || (!targetIsUi && !targetIsDecal);
 		if (placement == HierarchyDropPlacement.Into && !acceptsChildren)
 			placement = HierarchyDropPlacement.After;
 		effectivePlacement = placement;
