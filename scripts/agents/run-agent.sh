@@ -3,6 +3,7 @@
 # Usage: scripts/agents/run-agent.sh <task-id>      (task file: docs/agents/tasks/<task-id>.md)
 # Exit: 0 ok | 1 bad usage/setup | 2 no submit_and_exit seen | 3 no commits on branch | 4 cline failed
 set -euo pipefail
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
 
 TASK_ID="${1:?usage: run-agent.sh <task-id>}"
 REPO="${OL_REPO:-/home/rolkka/openlot}"
